@@ -220,14 +220,17 @@ endif ()
 
 set(WebProcess_LIBRARIES
     WebKit
+    pthread
 )
 
 set(NetworkProcess_LIBRARIES
     WebKit
+    pthread
 )
 
 set(StorageProcess_LIBRARIES
     WebKit
+    pthread
 )
 
 set(PluginProcess_LIBRARIES
