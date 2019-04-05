@@ -703,14 +703,17 @@ set(WebKit_MESSAGES_IN_FILES
 
 set(WebProcess_LIBRARIES
     WebKit
+    pthread
 )
 
 set(NetworkProcess_LIBRARIES
     WebKit
+    pthread
 )
 
 set(StorageProcess_LIBRARIES
     WebKit
+    pthread
 )
 
 if (APPLE)
