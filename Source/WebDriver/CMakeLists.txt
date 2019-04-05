@@ -16,6 +16,7 @@ set(WebDriver_SOURCES
 
 set(WebDriver_LIBRARIES
     WTF
+    pthread
 )
 
 set(WebDriver_SCRIPTS
