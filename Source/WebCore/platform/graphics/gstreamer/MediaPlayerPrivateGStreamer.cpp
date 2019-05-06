@@ -388,7 +388,7 @@ MediaTime MediaPlayerPrivateGStreamer::playbackPosition() const
             return MediaTime::zeroTime();
         }
     }
-#elif PLATFORM(BCM_NEXUS)
+#elif PLATFORM(BCM_NEXUS_TEMPORARILY_DISABLED)
     // Implement getting pts time from broadcom decoder directly for seek functionality.
     // In some cases one stream (audio or video) is shorter than the other and its position doesn't
     // increase anymore. We need to query both decoders (if available) and choose the highest position.
