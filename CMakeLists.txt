@@ -63,7 +63,7 @@ endif ()
 
 if (${CMAKE_CXX_COMPILER_ID} STREQUAL "GNU")
     if (${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS "6.0.0")
-        message(FATAL_ERROR "GCC 6.0.0 is required to build WebKitGTK+, use a newer GCC version or clang")
+        message(STATUS "GCC 6.0.0 is required to build WebKitGTK+, use a newer GCC version or clang")
     endif ()
 endif ()
 
