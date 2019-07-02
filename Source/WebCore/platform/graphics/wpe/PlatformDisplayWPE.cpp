@@ -37,6 +37,20 @@
 
 namespace WebCore {
 
+void waitForDebugger() {
+    const bool waitForDebugger = getenv("WPEWEBKIT_SIGSTOP") ? true : false;
+    if (waitForDebugger) {
+        const pid_t pid = getpid();
+        printf("wpewebkit: waiting for debugger...\n");
+        printf("wpewebkit: Issue\n");
+        printf("wpewebkit: \t$ gdb -p %u\n", pid);
+        printf("wpewebkit: or\n");
+        printf("wpewebkit: \t$ kill -SIGCONT %u\n", pid);
+        raise(SIGSTOP);
+        printf("wpewebkit: Process %u running...\n", pid);
+    }
+}
+
 std::unique_ptr<PlatformDisplayWPE> PlatformDisplayWPE::create()
 {
     return std::unique_ptr<PlatformDisplayWPE>(new PlatformDisplayWPE());
@@ -54,6 +68,8 @@ PlatformDisplayWPE::~PlatformDisplayWPE()
 
 void PlatformDisplayWPE::initialize(int hostFd)
 {
+    waitForDebugger();
+
     m_backend = wpe_renderer_backend_egl_create(hostFd);
 
     m_eglDisplay = eglGetDisplay(wpe_renderer_backend_egl_get_native_display(m_backend));
