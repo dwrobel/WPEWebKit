@@ -130,6 +130,7 @@ private:
     MediaTime m_mediaTimeDuration;
     bool m_mseSeekCompleted = true;
     RefPtr<PlaybackPipeline> m_playbackPipeline;
+    bool m_didLogRebufferingOnce { false };
     URL m_url;
 };
 
