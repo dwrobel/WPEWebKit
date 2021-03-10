@@ -1307,6 +1307,7 @@ void MediaPlayerPrivateGStreamer::handleMessage(GstMessage* message)
             || g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_WRONG_TYPE)
             || g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_FAILED)
             || g_error_matches(err.get(), GST_CORE_ERROR, GST_CORE_ERROR_MISSING_PLUGIN)
+            || g_error_matches(err.get(), GST_CORE_ERROR, GST_CORE_ERROR_PAD)
             || g_error_matches(err.get(), GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_NOT_FOUND)) {
             fprintf(stderr, "HTML5 video: Playback failed: Format error [%s]\n",m_url.string().utf8().data());
             error = MediaPlayer::FormatError;
