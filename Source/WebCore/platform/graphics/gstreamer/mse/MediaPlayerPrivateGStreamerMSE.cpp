@@ -1210,6 +1210,15 @@ MediaTime MediaPlayerPrivateGStreamerMSE::maxMediaTimeSeekable() const
     return result;
 }
 
+MediaTime MediaPlayerPrivateGStreamerMSE::maxTimeLoaded() const
+{
+    if (m_errorOccured)
+        return MediaTime::zeroTime();
+
+    MediaTime maxBufferedTime = buffered()->maximumBufferedTime();
+    return maxBufferedTime.isValid() ? maxBufferedTime : MediaTime::zeroTime();
+}
+
 #if ENABLE(ENCRYPTED_MEDIA)
 void MediaPlayerPrivateGStreamerMSE::dispatchDecryptionStructure(GUniquePtr<GstStructure>&& structure)
 {
