@@ -43,7 +43,7 @@ bool WKNavigationResponseCanShowMIMEType(WKNavigationResponseRef response)
 
 WKURLResponseRef WKNavigationResponseGetURLResponse(WKNavigationResponseRef response)
 {
-    return toAPI(&API::URLResponse::create(toImpl(response)->response()).leakRef());
+    return toAPI(toImpl(response)->response());
 }
 
 WKURLResponseRef WKNavigationResponseCopyURLResponse(WKNavigationResponseRef response)
