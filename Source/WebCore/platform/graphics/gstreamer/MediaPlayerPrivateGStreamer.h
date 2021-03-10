@@ -143,6 +143,8 @@ public:
     bool m_reportedPlaybackFailed;
     bool m_reportedPlaybackEOS;
 
+    String errorMessage() const override { return m_errorMessage; }
+
 private:
     static void getSupportedTypes(HashSet<String, ASCIICaseInsensitiveHash>&);
     static MediaPlayer::SupportsType supportsType(const MediaEngineSupportParameters&);
@@ -300,6 +302,8 @@ private:
 #endif
 #endif
     virtual bool isMediaSource() const { return false; }
+
+    String m_errorMessage;
 };
 }
 

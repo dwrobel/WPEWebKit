@@ -249,7 +249,7 @@ static GstFlowReturn webkitMediaCommonEncryptionDecryptTransformInPlace(GstBaseT
             priv->m_protectionEvents.append(GRefPtr<GstEvent>(static_cast<GstEvent*>(g_value_get_boxed(gst_value_list_get_value(streamEncryptionEventsList, i)))));
         gst_structure_remove_field(protectionMeta->info, "stream-encryption-events");
         if (!gst_structure_n_fields(protectionMeta->info)) {
-            GST_ERROR_OBJECT(self, "buffer %p did not have enough protection meta-data", buffer);
+            GST_ELEMENT_ERROR (self, STREAM, FAILED, ("Not enough protection meta-data"), ("Buffer %p did not have enough protection meta-data", buffer));
             return GST_FLOW_NOT_SUPPORTED;
         }
     }
@@ -258,7 +258,7 @@ static GstFlowReturn webkitMediaCommonEncryptionDecryptTransformInPlace(GstBaseT
     value = gst_structure_get_value(protectionMeta->info, "kid");
     GstBuffer* keyIDBuffer = nullptr;
     if (!value) {
-        GST_ERROR_OBJECT(self, "No key ID available for encrypted sample");
+        GST_ELEMENT_ERROR (self, STREAM, DECRYPT_NOKEY, ("No key ID available for encrypted sample"), (NULL));
         return GST_FLOW_NOT_SUPPORTED;
     }
 
@@ -266,7 +266,7 @@ static GstFlowReturn webkitMediaCommonEncryptionDecryptTransformInPlace(GstBaseT
 
     GstMappedBuffer mappedKeyID(keyIDBuffer, GST_MAP_READ);
     if (!mappedKeyID) {
-        GST_ERROR_OBJECT(self, "Failed to map key ID buffer");
+        GST_ELEMENT_ERROR (self, STREAM, FAILED, ("Failed to map key ID buffer."), (NULL));
         return GST_FLOW_NOT_SUPPORTED;
     }
     auto keyId = WebCore::SharedBuffer::create(mappedKeyID.data(), mappedKeyID.size());
@@ -283,7 +283,7 @@ static GstFlowReturn webkitMediaCommonEncryptionDecryptTransformInPlace(GstBaseT
     if (!priv->m_currentKeyID.has_value() || priv->m_currentKeyID.value().ptr() != keyId.ptr()) {
         priv->m_currentKeyID.reset();
         if (GST_STATE(GST_ELEMENT(self)) < GST_STATE_PAUSED || (GST_STATE_TARGET(GST_ELEMENT(self)) != GST_STATE_VOID_PENDING && GST_STATE_TARGET(GST_ELEMENT(self)) < GST_STATE_PAUSED)) {
-            GST_ERROR_OBJECT(self, "can't process key requests in less than PAUSED state");
+            GST_ELEMENT_ERROR (self, STREAM, FAILED, ("can't process key requests in less than PAUSED state"), (NULL));
             return GST_FLOW_NOT_SUPPORTED;
         }
         if (!priv->m_condition.waitFor(priv->m_mutex, WEBCORE_GSTREAMER_EME_LICENSE_KEY_RESPONSE_TIMEOUT, [self, priv, keyID = WTFMove(keyId)] {
@@ -300,7 +300,7 @@ static GstFlowReturn webkitMediaCommonEncryptionDecryptTransformInPlace(GstBaseT
                 return false;
             }
         })) {
-            GST_ERROR_OBJECT(self, "key not available");
+            GST_ELEMENT_ERROR (self, STREAM, DECRYPT_NOKEY, ("Key not available"), (NULL));
             return GST_FLOW_NOT_SUPPORTED;
         }
         if (priv->m_shouldStop) {
@@ -317,14 +317,14 @@ static GstFlowReturn webkitMediaCommonEncryptionDecryptTransformInPlace(GstBaseT
 
     unsigned ivSize;
     if (!gst_structure_get_uint(protectionMeta->info, "iv_size", &ivSize)) {
-        GST_ERROR_OBJECT(self, "Failed to get iv_size");
+        GST_ELEMENT_ERROR (self, STREAM, FAILED, ("Failed to get iv_size"), (NULL));
         gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
         return GST_FLOW_NOT_SUPPORTED;
     }
 
     gboolean encrypted;
     if (!gst_structure_get_boolean(protectionMeta->info, "encrypted", &encrypted)) {
-        GST_ERROR_OBJECT(self, "Failed to get encrypted flag");
+        GST_ELEMENT_ERROR (self, STREAM, FAILED, ("Failed to get encrypted flag"), (NULL));
         gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
         return GST_FLOW_NOT_SUPPORTED;
     }
@@ -338,7 +338,7 @@ static GstFlowReturn webkitMediaCommonEncryptionDecryptTransformInPlace(GstBaseT
 
     unsigned subSampleCount;
     if (!gst_structure_get_uint(protectionMeta->info, "subsample_count", &subSampleCount)) {
-        GST_ERROR_OBJECT(self, "Failed to get subsample_count");
+        GST_ELEMENT_ERROR (self, STREAM, FAILED, ("Failed to get subsample_count"), (NULL));
         gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
         return GST_FLOW_NOT_SUPPORTED;
     }
@@ -347,7 +347,7 @@ static GstFlowReturn webkitMediaCommonEncryptionDecryptTransformInPlace(GstBaseT
     if (subSampleCount) {
         value = gst_structure_get_value(protectionMeta->info, "subsamples");
         if (!value) {
-            GST_ERROR_OBJECT(self, "Failed to get subsamples");
+            GST_ELEMENT_ERROR (self, STREAM, FAILED, ("Failed to get subsamples"), (NULL));
             gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
             return GST_FLOW_NOT_SUPPORTED;
         }
@@ -357,14 +357,14 @@ static GstFlowReturn webkitMediaCommonEncryptionDecryptTransformInPlace(GstBaseT
     GST_MEMDUMP_OBJECT(self, "key ID for sample", mappedKeyID.data(), mappedKeyID.size());
 
     if (!klass->setupCipher(self, keyIDBuffer)) {
-        GST_ERROR_OBJECT(self, "Failed to configure cipher");
+        GST_ELEMENT_ERROR (self, STREAM, FAILED, ("Failed to configure cipher"), (NULL));
         gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
         return GST_FLOW_NOT_SUPPORTED;
     }
 
     value = gst_structure_get_value(protectionMeta->info, "iv");
     if (!value) {
-        GST_ERROR_OBJECT(self, "Failed to get IV for sample");
+        GST_ELEMENT_ERROR (self, STREAM, FAILED, ("Failed to get IV for sample"), (NULL));
         klass->releaseCipher(self);
         gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
         return GST_FLOW_NOT_SUPPORTED;
@@ -373,7 +373,7 @@ static GstFlowReturn webkitMediaCommonEncryptionDecryptTransformInPlace(GstBaseT
     GstBuffer* ivBuffer = gst_value_get_buffer(value);
     GST_TRACE_OBJECT(self, "decrypting");
     if (!klass->decrypt(self, keyIDBuffer, ivBuffer, buffer, subSampleCount, subSamplesBuffer)) {
-        GST_ERROR_OBJECT(self, "Decryption failed");
+        GST_ELEMENT_ERROR (self, STREAM, DECRYPT, ("Decryption failed"), (NULL));
         klass->releaseCipher(self);
         gst_buffer_remove_meta(buffer, reinterpret_cast<GstMeta*>(protectionMeta));
         gst_element_post_message(GST_ELEMENT(self), gst_message_new_element(GST_OBJECT(self), gst_structure_new("drm-decryption-error-encountered", nullptr)));

@@ -1302,8 +1302,11 @@ void MediaPlayerPrivateGStreamer::handleMessage(GstMessage* message)
 
         GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS(GST_BIN(m_pipeline.get()), GST_DEBUG_GRAPH_SHOW_ALL, "webkit-video.error");
 
+        m_errorMessage = err->message;
         error = MediaPlayer::Empty;
         if (g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_CODEC_NOT_FOUND)
+            || g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_DECRYPT)
+            || g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_DECRYPT_NOKEY)
             || g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_WRONG_TYPE)
             || g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_FAILED)
             || g_error_matches(err.get(), GST_CORE_ERROR, GST_CORE_ERROR_MISSING_PLUGIN)
@@ -2247,15 +2250,15 @@ void MediaPlayerPrivateGStreamer::handleDecryptionError(const GstStructure* stru
 {
     ASSERT(isMainThread());
 
-    RunLoop::main().dispatch([this, weakThis = m_weakPtrFactory.createWeakPtr(*this)] {
-        if (!weakThis)
-            return;
+    if (gst_structure_has_field_typed(structure, "error-message", G_TYPE_STRING)) {
+        const gchar* errorMessage = gst_structure_get_string(structure, "error-message");
+        m_errorMessage = errorMessage;
+    }
 
-        GST_WARNING("scheduling decryptionErrorEncountered event");
-        fprintf(stderr, "HTML5 video: Playback failed: Decryption error [%s]\n", m_url.string().utf8().data());
-        loadingFailed(MediaPlayer::FormatError);
-        m_player->decryptErrorEncountered(); // override the error code
-    });
+    GST_WARNING("scheduling decryptionErrorEncountered event");
+    fprintf(stderr, "HTML5 video: Playback failed: Decryption error [%s]\n", m_url.string().utf8().data());
+    loadingFailed(MediaPlayer::FormatError);
+    m_player->decryptErrorEncountered(); // override the error code
 }
 
 void MediaPlayerPrivateGStreamer::cdmInstanceAttached(CDMInstance& instance)
@@ -2263,7 +2266,8 @@ void MediaPlayerPrivateGStreamer::cdmInstanceAttached(CDMInstance& instance)
     if(m_cdmInstance.get() != &instance && m_cdmInstance)
         const_cast<CDMInstance*>(m_cdmInstance.get())->setTracker(nullptr);
     MediaPlayerPrivateGStreamerBase::cdmInstanceAttached(instance);
-    const_cast<CDMInstance*>(m_cdmInstance.get())->setTracker(m_tracker);
+    if (m_cdmInstance)
+        const_cast<CDMInstance*>(m_cdmInstance.get())->setTracker(m_tracker);
 }
 
 void MediaPlayerPrivateGStreamer::cdmInstanceDetached(CDMInstance& instance)
