@@ -5742,7 +5742,7 @@ void HTMLMediaElement::visibilityStateChanged()
         m_player->setVisible(!m_elementIsHidden);
 
     bool isPlayingAudio = isPlaying() && hasAudio() && !muted() && volume();
-    if (!isPlayingAudio) {
+    if (true || !isPlayingAudio) {
         if (m_elementIsHidden) {
             ALWAYS_LOG(LOGIDENTIFIER, "Suspending playback after going to the background");
             m_mediaSession->beginInterruption(PlatformMediaSession::EnteringBackground);

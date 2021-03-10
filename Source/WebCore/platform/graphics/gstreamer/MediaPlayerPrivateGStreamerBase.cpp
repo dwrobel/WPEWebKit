@@ -1602,6 +1602,17 @@ void MediaPlayerPrivateGStreamerBase::platformResume()
 #endif
 }
 
+void MediaPlayerPrivateGStreamerBase::setVisible(bool visible)
+{
+    if (m_visible == visible)
+        return;
+    m_visible = visible;
+
+#if USE(HOLE_PUNCH_GSTREAMER)
+    updateVideoRectangle(!m_visible);
+#endif
+}
+
 }
 
 #endif // USE(GSTREAMER)

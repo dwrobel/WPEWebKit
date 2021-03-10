@@ -96,7 +96,7 @@ public:
 
     bool ended() const override { return m_isEndReached; }
 
-    void setVisible(bool) override { }
+    void setVisible(bool) override;
     void setSize(const IntSize&) override;
     void setPosition(const IntPoint&) override;
     void sizeChanged();
@@ -294,6 +294,8 @@ protected:
     RefPtr<const CDMInstance> m_cdmInstance;
     String m_lastInitData;
 #endif
+
+    bool m_visible { true };
 };
 
 }

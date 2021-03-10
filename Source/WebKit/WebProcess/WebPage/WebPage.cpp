@@ -2766,7 +2766,7 @@ void WebPage::updateIsInWindow(bool isInitialState)
         // Defer the call to Page::setCanStartMedia() since it ends up sending a synchronous message to the UI process
         // in order to get plug-in connections, and the UI process will be waiting for the Web process to update the backing
         // store after moving the view into a window, until it times out and paints white. See <rdar://problem/9242771>.
-        if (m_mayStartMediaWhenInWindow)
+        if (m_mayStartMediaWhenInWindow && !m_setCanStartMediaTimer.isActive())
             m_setCanStartMediaTimer.startOneShot(0_s);
 
         WebProcess::singleton().pageDidEnterWindow(m_pageID);
@@ -2784,6 +2784,14 @@ void WebPage::visibilityDidChange()
         // if it gets terminated while in the background.
         if (auto* frame = m_mainFrame->coreFrame())
             frame->loader().history().saveDocumentAndScrollState();
+    }
+
+    if (!isVisible) {
+        m_setCanStartMediaTimer.stop();
+        m_page->setCanStartMedia(false);
+    } else if (m_activityState & WebCore::ActivityState::IsInWindow) {
+        if (m_mayStartMediaWhenInWindow && !m_setCanStartMediaTimer.isActive())
+            m_setCanStartMediaTimer.startOneShot(0_s);
     }
 }
 
