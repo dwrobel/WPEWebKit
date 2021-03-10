@@ -36,7 +36,7 @@ const char* GStreamerEMEUtilities::s_UnspecifiedKeySystem = "org.webkit.unspecif
 
 #if USE(OPENCDM)
 const char* GStreamerEMEUtilities::s_PlayReadyUUID = WEBCORE_GSTREAMER_EME_UTILITIES_PLAYREADY_UUID;
-std::array<const char*,2> GStreamerEMEUtilities::s_PlayReadyKeySystems = { "com.microsoft.playready", "com.youtube.playready" };
+std::array<const char*,3> GStreamerEMEUtilities::s_PlayReadyKeySystems = { "com.microsoft.playready", "com.youtube.playready", "com.amazon.playready" };
 #endif
 
 #if USE(OPENCDM)
