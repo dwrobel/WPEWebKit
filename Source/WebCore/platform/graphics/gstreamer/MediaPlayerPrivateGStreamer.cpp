@@ -164,6 +164,7 @@ MediaPlayerPrivateGStreamer::MediaPlayerPrivateGStreamer(MediaPlayer* player)
     , m_buffering(false)
     , m_bufferingPercentage(0)
     , m_cachedPosition(MediaTime::invalidTime())
+    , m_playbackProgress(MediaTime::zeroTime())
     , m_canFallBackToLastFinishedSeekPosition(false)
     , m_changingRate(false)
     , m_downloadFinished(false)
@@ -399,6 +400,7 @@ MediaTime MediaPlayerPrivateGStreamer::playbackPosition() const
 {
 
     if (m_isEndReached) {
+        m_playbackProgress = MediaTime::zeroTime();
         // Position queries on a null pipeline return 0. If we're at
         // the end of the stream the pipeline is null but we want to
         // report either the seek time or the duration because this is
@@ -417,6 +419,7 @@ MediaTime MediaPlayerPrivateGStreamer::playbackPosition() const
         return m_cachedPosition;
 
     m_lastQueryTime = now;
+    m_playbackProgress = MediaTime::zeroTime();
 
     // Position is only available if no async state change is going on and the state is either paused or playing.
     gint64 position = GST_CLOCK_TIME_NONE;
@@ -447,6 +450,7 @@ MediaTime MediaPlayerPrivateGStreamer::playbackPosition() const
     else if (m_canFallBackToLastFinishedSeekPosition)
         playbackPosition = m_seekTime;
 
+    m_playbackProgress = m_cachedPosition.isValid() ? abs(playbackPosition - m_cachedPosition) : playbackPosition;
     m_cachedPosition = playbackPosition;
     return playbackPosition;
 }
