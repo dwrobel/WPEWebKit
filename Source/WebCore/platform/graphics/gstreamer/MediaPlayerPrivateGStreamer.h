@@ -248,6 +248,7 @@ protected:
     static GstFlowReturn newTextSampleCallback(MediaPlayerPrivateGStreamer*);
 #endif
     static gboolean durationChangedCallback(MediaPlayerPrivateGStreamer*);
+    static void elementSetupCallback(MediaPlayerPrivateGStreamer*, GstElement*, GstElement*);
 
 private:
 
