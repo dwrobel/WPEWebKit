@@ -1634,6 +1634,7 @@ namespace WebCore {
 namespace
 {
 bool gYouTubeQuirksEnabled = false;
+bool gDAZNQuirksEnabled = false;
 }
 
 void MediaPlayer::setYouTubeQuirksEnabled(bool enabled)
@@ -1646,7 +1647,15 @@ bool MediaPlayer::isYouTubeQuirksEnabled()
     static bool enableYTQuirks = !!getenv("WPE_ENABLE_YT_MSE_HACKS");
     return gYouTubeQuirksEnabled || enableYTQuirks;
 }
+void MediaPlayer::setDAZNQuirksEnabled(bool enabled)
+{
+    gDAZNQuirksEnabled = enabled;
+}
 
+bool MediaPlayer::isDAZNQuirksEnabled()
+{
+    return gDAZNQuirksEnabled;
+}
 }
 
 #endif
