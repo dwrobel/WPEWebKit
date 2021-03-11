@@ -173,9 +173,6 @@ void ImageBufferData::swapBuffersIfNeeded()
 {
     ASSERT(m_renderingMode == RenderingMode::Accelerated);
 
-    if (!m_bufferChanged)
-        return;
-
     GLContext* previousActiveContext = GLContext::current();
     cairo_surface_flush(m_surface.get());
 
@@ -339,7 +336,7 @@ ImageBuffer::ImageBuffer(const FloatSize& size, float resolutionScale, ColorSpac
     RefPtr<cairo_t> cr = adoptRef(cairo_create(m_data.m_surface.get()));
     m_data.m_platformContext.setCr(cr.get());
     // Disable antialiasing if cairo is using the NOAA compositor.
-    if (cairoIsUsingNOAA())
+    if ((m_data.m_renderingMode == Accelerated) && cairoIsUsingNOAA())
         cairo_set_antialias(cr.get(), CAIRO_ANTIALIAS_NONE);
     m_data.m_context = std::make_unique<GraphicsContext>(GraphicsContextImplCairo::createFactory(m_data.m_platformContext));
     success = true;

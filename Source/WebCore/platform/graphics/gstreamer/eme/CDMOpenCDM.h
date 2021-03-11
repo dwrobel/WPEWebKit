@@ -104,11 +104,13 @@ public:
     CDMInstanceClient* client() const { return m_client; }
 
     OpenCDMSystem* ocdmSystem() const { return &m_openCDMSystem; }
+
+    bool hasValidSessions() const;
+
 private:
     bool addSession(const String& sessionId, RefPtr<Session>&& session);
     bool removeSession(const String& sessionId);
     RefPtr<Session> lookupSession(const String& sessionId) const;
-    RefPtr<Session> lookupSessionUnlocked(const String& sessionId) const;
 
     String m_keySystem;
     OpenCDMSystem& m_openCDMSystem;

@@ -615,6 +615,7 @@ void MediaKeySession::enqueueMessage(MediaKeyMessageType messageType, const Shar
     // 2. Queue a task to create an event named message that does not bubble and is not cancellable using the MediaKeyMessageEvent
     //    interface with its type attribute set to message and its isTrusted attribute initialized to true, and dispatch it at the
     //    session.
+    LOG(EME, "EME - enqueueMessage type=%d", messageType);
     auto messageEvent = MediaKeyMessageEvent::create(eventNames().messageEvent, {messageType, message.tryCreateArrayBuffer()}, Event::IsTrusted::Yes);
     m_eventQueue.enqueueEvent(WTFMove(messageEvent));
 }
@@ -753,8 +754,7 @@ String MediaKeySession::mediaKeysStorageDirectory() const
 
 bool MediaKeySession::hasPendingActivity() const
 {
-    notImplemented();
-    return false;
+    return m_eventQueue.hasPendingEvents() || m_taskQueue.hasPendingTasks();
 }
 
 const char* MediaKeySession::activeDOMObjectName() const

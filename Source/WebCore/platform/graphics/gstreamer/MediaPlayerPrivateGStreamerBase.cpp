@@ -155,7 +155,7 @@ using namespace std;
 static const FloatSize s_holePunchDefaultFrameSize(1280, 720);
 #endif
 
-#if ENABLE(NATIVE_AUDIO)
+#if 1 // ENABLE(NATIVE_AUDIO)
 static const GstStreamVolumeFormat volumeFormat = GST_STREAM_VOLUME_FORMAT_LINEAR;
 #else
 static const GstStreamVolumeFormat volumeFormat = GST_STREAM_VOLUME_FORMAT_CUBIC;
@@ -664,7 +664,7 @@ void MediaPlayerPrivateGStreamerBase::setVolume(float volume)
         return;
 
     GST_DEBUG_OBJECT(pipeline(), "Setting volume: %f", volume);
-    gst_stream_volume_set_volume(m_volumeElement.get(), GST_STREAM_VOLUME_FORMAT_CUBIC, static_cast<double>(volume));
+    gst_stream_volume_set_volume(m_volumeElement.get(), volumeFormat, static_cast<double>(volume));
 }
 
 float MediaPlayerPrivateGStreamerBase::volume() const
@@ -1358,7 +1358,7 @@ void MediaPlayerPrivateGStreamerBase::setStreamVolumeElement(GstStreamVolume* vo
 
     // We don't set the initial volume because we trust the sink to keep it for us. See
     // https://bugs.webkit.org/show_bug.cgi?id=118974 for more information.
-    if (!m_player->platformVolumeConfigurationRequired()) {
+    if (!m_player->platformVolumeConfigurationRequired() || true) {
         GST_DEBUG_OBJECT(pipeline(), "Setting stream volume to %f", m_player->volume());
         g_object_set(m_volumeElement.get(), "volume", m_player->volume(), nullptr);
     } else
@@ -1477,7 +1477,9 @@ void MediaPlayerPrivateGStreamerBase::initializationDataEncountered(const String
 
     GST_TRACE("init data encountered of size %" G_GSIZE_FORMAT " with MD5 %s", initData.sizeInBytes(), GStreamerEMEUtilities::initDataMD5(initData).utf8().data());
     GST_MEMDUMP("init data", initData.characters8(), initData.sizeInBytes());
-
+    if (m_lastInitData.sizeInBytes() >= initData.sizeInBytes() && memmem(m_lastInitData.characters8(), m_lastInitData.sizeInBytes(), initData.characters8(), initData.sizeInBytes()))
+        return;
+    m_lastInitData = initData;
     m_player->initializationDataEncountered(initDataType, ArrayBuffer::create(reinterpret_cast<const uint8_t*>(initData.characters8()), initData.sizeInBytes()));
 }
 
@@ -1502,6 +1504,16 @@ void MediaPlayerPrivateGStreamerBase::cdmInstanceAttached(CDMInstance& instance)
     gst_element_set_context(GST_ELEMENT(m_pipeline.get()), context.get());
 
     GST_LOG("CDM instance %p dispatched as context", m_cdmInstance.get());
+
+    #if USE(OPENCDM)
+    if (m_cdmInstance) {
+        auto& cdmInstanceOpenCDM = downcast<WebCore::CDMInstanceOpenCDM>(*m_cdmInstance);
+        if (cdmInstanceOpenCDM.hasValidSessions())
+        {
+            attemptToDecryptWithLocalInstance();
+        }
+    }
+    #endif
 }
 
 void MediaPlayerPrivateGStreamerBase::cdmInstanceDetached(CDMInstance& instance)
@@ -1522,6 +1534,12 @@ void MediaPlayerPrivateGStreamerBase::cdmInstanceDetached(CDMInstance& instance)
 void MediaPlayerPrivateGStreamerBase::attemptToDecryptWithInstance(CDMInstance& instance)
 {
     ASSERT(isMainThread());
+
+    if(!m_cdmInstance) {
+        cdmInstanceAttached(instance);
+        return;
+    }
+
     ASSERT(m_cdmInstance.get() == &instance);
     GST_TRACE("instance %p, current stored %p", &instance, m_cdmInstance.get());
     attemptToDecryptWithLocalInstance();
@@ -1587,6 +1605,17 @@ void MediaPlayerPrivateGStreamerBase::platformResume()
 #if USE(GSTREAMER_HOLEPUNCH)
     // Set an empty rectangle and allow updates.
     setRectangleToVideoSink(m_videoSink.get(), IntRect(), true);
+#endif
+}
+
+void MediaPlayerPrivateGStreamerBase::setVisible(bool visible)
+{
+    if (m_visible == visible)
+        return;
+    m_visible = visible;
+
+#if USE(HOLE_PUNCH_GSTREAMER)
+    updateVideoRectangle(!m_visible);
 #endif
 }
 

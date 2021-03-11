@@ -69,6 +69,19 @@ static inline bool mediaSourceLogEnabled()
 #endif
 }
 
+static inline MediaTime roundTowardsTimeScaleWithRoundingMargin(const MediaTime& time, uint32_t timeScale, const MediaTime& roundingMargin)
+{
+    while (true) {
+        if (time.timeScale() == timeScale)
+            return time;
+        MediaTime roundedTime = time.toTimeScale(timeScale);
+        if (abs(roundedTime - time) < roundingMargin || timeScale >= MediaTime::MaximumTimeScale)
+            return roundedTime;
+        if (!WTF::safeMultiply(timeScale, 2, timeScale) || timeScale > MediaTime::MaximumTimeScale)
+            timeScale = MediaTime::MaximumTimeScale;
+    }
+};
+
 static const double ExponentialMovingAverageCoefficient = 0.1;
 
 struct SourceBuffer::TrackBuffer {
@@ -375,6 +388,12 @@ void SourceBuffer::rangeRemoval(const MediaTime& start, const MediaTime& end)
     m_pendingRemoveStart = start;
     m_pendingRemoveEnd = end;
     m_removeTimer.startOneShot(0_s);
+
+    auto& buffered = m_buffered->ranges();
+    if (buffered.length() && buffered.start(0) >= m_pendingRemoveStart) {
+        LOG(MediaSource, "SourceBuffer::rangeRemoval(%p) - adjust start of range removal  %s -> 0", this, toString(m_pendingRemoveStart).utf8().data());
+        m_pendingRemoveStart = MediaTime::zeroTime();
+    }
 }
 
 void SourceBuffer::abortIfUpdating()
@@ -431,6 +450,8 @@ void SourceBuffer::removedFromMediaSource()
 
     m_private->removedFromMediaSource();
     m_source = nullptr;
+    m_asyncEventQueue.cancelAllEvents();
+    m_reportedExtraMemoryCost = 0;
 }
 
 void SourceBuffer::seekToTime(const MediaTime& time)
@@ -551,6 +572,8 @@ ExceptionOr<void> SourceBuffer::appendBufferInternal(const unsigned char* data, 
     if (isRemoved() || m_updating)
         return Exception { InvalidStateError };
 
+    LOG(Media, "SourceBuffer::appendBufferInternal(%p) - append size = %u, buffered = %s", this, size, toString(m_buffered->ranges()).utf8().data());
+
     // 3. If the readyState attribute of the parent media source is in the "ended" state then run the following steps:
     // 3.1. Set the readyState attribute of the parent media source to "open"
     // 3.2. Queue a task to fire a simple event named sourceopen at the parent media source .
@@ -563,9 +586,14 @@ ExceptionOr<void> SourceBuffer::appendBufferInternal(const unsigned char* data, 
 #if USE(GSTREAMER)
     // 5. If the buffer full flag equals true, then throw a QuotaExceededError exception and abort these step.
     if (m_bufferFull) {
-        LOG(MediaSource, "SourceBuffer::appendBufferInternal(%p) -  buffer full, failing with QuotaExceededError error", this);
+        if (!m_didLogQuotaErrorOnce) {
+            LOG_ERROR("SourceBuffer::appendBufferInternal(%p, %s) -  buffer full, failing with QuotaExceededError error", this,
+                    (hasVideo() ? "video" : (hasAudio() ? "audio" : "unknown")));
+            m_didLogQuotaErrorOnce = true;
+        }
         return Exception { QuotaExceededError };
     }
+    m_didLogQuotaErrorOnce = false;
 #endif
 
     // NOTE: Return to 3.2 appendBuffer()
@@ -576,19 +604,28 @@ ExceptionOr<void> SourceBuffer::appendBufferInternal(const unsigned char* data, 
     m_updating = true;
 
     // 5. Queue a task to fire a simple event named updatestart at this SourceBuffer object.
-    scheduleEvent(eventNames().updatestartEvent);
+    bool canFireMicrotask = false;
+    if (hasEventListeners(eventNames().updatestartEvent))
+        scheduleEvent(eventNames().updatestartEvent);
+    else
+        canFireMicrotask = true;
 
     // 6. Asynchronously run the buffer append algorithm.
     m_appendBufferTimer.startOneShot(0_s);
 
-    // Add microtask to start append right after leaving current script context. Keep the timer active to check if append was aborted.
-    auto microtask = std::make_unique<ActiveDOMCallbackMicrotask>(MicrotaskQueue::mainThreadQueue(), *scriptExecutionContext(), [protectedThis = makeRef(*this)]() mutable {
-        if (protectedThis->m_appendBufferTimer.isActive()) {
-            protectedThis->m_appendBufferTimer.stop();
-            protectedThis->appendBufferTimerFired();
-        }
-    });
-    MicrotaskQueue::mainThreadQueue().append(WTFMove(microtask));
+    if (canFireMicrotask) {
+        // Add microtask to start append right after leaving current script context. Keep the timer active to check if append was aborted.
+        auto microtask = std::make_unique<ActiveDOMCallbackMicrotask>(MicrotaskQueue::mainThreadQueue(), *scriptExecutionContext(), [this, protectedThis = makeRef(*this)]() mutable {
+            // check if page added updatestart event listener
+            if (hasEventListeners(eventNames().updatestartEvent))
+                scheduleEvent(eventNames().updatestartEvent);
+            else if (!m_asyncEventQueue.hasPendingEventsListeners() && m_appendBufferTimer.isActive()) {
+                m_appendBufferTimer.stop();
+                appendBufferTimerFired();
+            }
+        });
+        MicrotaskQueue::mainThreadQueue().append(WTFMove(microtask));
+    }
 
     reportExtraMemoryAllocated();
 
@@ -763,7 +800,7 @@ static PlatformTimeRanges removeSamplesFromTrackBuffer(const DecodeOrderSampleMa
                 additionalErasedRanges.add(previousSample.presentationTime() + previousSample.duration(), erasedStart);
         }
 
-        auto endIterator = trackBuffer.samples.presentationOrder().findSampleStartingOnOrAfterPresentationTime(erasedEnd);
+        auto endIterator = trackBuffer.samples.presentationOrder().findSampleContainingOrAfterPresentationTime(erasedEnd);
         if (endIterator == trackBuffer.samples.presentationOrder().end())
             additionalErasedRanges.add(erasedEnd, MediaTime::positiveInfiniteTime());
         else {
@@ -793,6 +830,7 @@ void SourceBuffer::removeCodedFrames(const MediaTime& start, const MediaTime& en
     // 1. Let start be the starting presentation timestamp for the removal range.
     MediaTime durationMediaTime = m_source->duration();
     MediaTime currentMediaTime = m_source->currentTime();
+    bool shouldStallPlayback = false;
 
     // 2. Let end be the end presentation timestamp for the removal range.
     // 3. For each track buffer in this source buffer, run the following steps:
@@ -812,7 +850,9 @@ void SourceBuffer::removeCodedFrames(const MediaTime& start, const MediaTime& en
             RefPtr<MediaSample> sample = sampleIterator->second;
             if (!sample->isDivisable())
                 return;
-            std::pair<RefPtr<MediaSample>, RefPtr<MediaSample>> replacementSamples = sample->divide(time);
+            MediaTime microsecond(1, 1000000);
+            MediaTime roundedTime = roundTowardsTimeScaleWithRoundingMargin(time, sample->presentationTime().timeScale(), microsecond);
+            std::pair<RefPtr<MediaSample>, RefPtr<MediaSample>> replacementSamples = sample->divide(roundedTime);
             if (!replacementSamples.first || !replacementSamples.second)
                 return;
             LOG(MediaSource, "SourceBuffer::removeCodedFrames(%p) - splitting sample (%s) into\n\t(%s)\n\t(%s)", this,
@@ -888,15 +928,22 @@ void SourceBuffer::removeCodedFrames(const MediaTime& start, const MediaTime& en
         // and less than the remove end timestamp, and HTMLMediaElement.readyState is greater than HAVE_METADATA, then set
         // the HTMLMediaElement.readyState attribute to HAVE_METADATA and stall playback.
         if (m_active && currentMediaTime >= start && currentMediaTime < end && m_private->readyState() > MediaPlayer::HaveMetadata)
-            m_private->setReadyState(MediaPlayer::HaveMetadata);
+            shouldStallPlayback = true;
     }
     
     updateBufferedFromTrackBuffers();
+    if (shouldStallPlayback)
+       m_private->setReadyState(MediaPlayer::HaveMetadata);
 
     // 4. If buffer full flag equals true and this object is ready to accept more bytes, then set the buffer full flag to false.
     // No-op
 
     LOG(Media, "SourceBuffer::removeCodedFrames(%p) - buffered = %s", this, toString(m_buffered->ranges()).utf8().data());
+
+    size_t extraMemoryCost = this->extraMemoryCost();
+    if (m_reportedExtraMemoryCost > extraMemoryCost)
+        m_reportedExtraMemoryCost = extraMemoryCost;
+
 }
 
 void SourceBuffer::removeTimerFired()
@@ -962,13 +1009,17 @@ void SourceBuffer::evictCodedFrames(size_t newDataSize)
     MediaTime maximumRangeEnd = currentTime - thirtySeconds;
 
 #if defined(METROLOGICAL)
-    MediaTime microSecond = MediaTime(1, 1000000);
     for (auto& trackBuffer : m_trackBufferMap.values()) {
+        auto t = std::max(MediaTime::zeroTime(), currentTime - MediaTime(2, 1));
         auto prevSync =
-            trackBuffer.samples.decodeOrder().findSyncSamplePriorToPresentationTime(currentTime);
+            trackBuffer.samples.decodeOrder().findSyncSamplePriorToPresentationTime(t);
         if (prevSync != trackBuffer.samples.decodeOrder().rend()) {
             // Don't include the sync frame in the range, just finish right before it.
-            maximumRangeEnd = prevSync->second->presentationTime() - microSecond;
+            prevSync++;
+        }
+        if (prevSync != trackBuffer.samples.decodeOrder().rend()) {
+            maximumRangeEnd = prevSync->second->presentationTime();
+            break;
         }
     }
 #endif
@@ -983,6 +1034,12 @@ void SourceBuffer::evictCodedFrames(size_t newDataSize)
 
     if (MediaTime::zeroTime() != rangeStart && rangeStart < maximumRangeEnd) {
         removeCodedFrames(MediaTime::zeroTime(), rangeStart, true);
+        // Check if removed enough already
+        if (extraMemoryCost() + newDataSize < maximumBufferSize) {
+            LOG(MediaSource, "SourceBuffer::evictCodedFrames(%p) - the buffer is not full anymore.", this);
+            m_bufferFull = false;
+            return;
+        }
     }
 
     while (rangeStart < maximumRangeEnd) {
@@ -1059,13 +1116,15 @@ void SourceBuffer::evictCodedFrames(size_t newDataSize)
 
     const auto safeToRemoveRange = PlatformTimeRanges(minimumRangeStart, rangeEnd);
     while (rangeStart > minimumRangeStart) {
-        LOG(MediaSource, "SourceBuffer::evictCodedFrames(%p) - evicting: extraMemoryCost: %zu, rangeStart: %f, rangeEnd: %f",
-                this, extraMemoryCost(), rangeStart.toDouble(), rangeEnd.toDouble());
-
         auto removalRange = PlatformTimeRanges(rangeStart, rangeEnd);
         removalRange.intersectWith(safeToRemoveRange);
         auto intersectedRanges = removalRange;
         intersectedRanges.intersectWith(buffered);
+
+        if (intersectedRanges.length() > 0) {
+            LOG(MediaSource, "SourceBuffer::evictCodedFrames(%p) - evicting: extraMemoryCost: %zu, rangeStart: %f, rangeEnd: %f",
+                this, extraMemoryCost(), rangeStart.toDouble(), rangeEnd.toDouble());
+        }
 
         removeFramesWhileFull(intersectedRanges);
 
@@ -1125,11 +1184,17 @@ static void maximumBufferSizeDefaults(size_t& maxBufferSizeVideo, size_t& maxBuf
                 maxBufferSizeText = size * units;
         }
     }
-
+#if USE(SVP)
+    if (maxBufferSizeAudio == 0)
+        maxBufferSizeAudio = 6 * 1024 * 1024;
+    if (maxBufferSizeVideo == 0)
+        maxBufferSizeVideo = 45 * 1024 * 1024;
+#else
     if (!maxBufferSizeAudio)
-        maxBufferSizeAudio = 3 * 1024 * 1024;
+        maxBufferSizeAudio = 2 * 1024 * 1024;
     if (!maxBufferSizeVideo)
-        maxBufferSizeVideo = 30 * 1024 * 1024;
+        maxBufferSizeVideo = 15 * 1024 * 1024;
+#endif
     if (!maxBufferSizeText)
         maxBufferSizeText = 1 * 1024 * 1024;
 }
@@ -1141,6 +1206,18 @@ size_t SourceBuffer::maximumBufferSize() const
 
     if (!maxBufferSizeVideo)
         maximumBufferSizeDefaults(maxBufferSizeVideo, maxBufferSizeAudio, maxBufferSizeText);
+
+    if (m_source && m_source->sourceBuffers() && m_source->sourceBuffers()->length() == 1)
+        return maxBufferSizeVideo;
+
+#if USE(SVP)
+    if (m_useClearContentLimits) {
+        if (m_videoTracks && m_videoTracks->length() > 0)
+            return 2 * maxBufferSizeVideo;
+        if (m_audioTracks && m_audioTracks->length() > 0)
+            return 2 * maxBufferSizeAudio;
+    }
+#endif
 
     if (m_videoTracks && m_videoTracks->length() > 0)
         return maxBufferSizeVideo;
@@ -1597,17 +1674,6 @@ void SourceBuffer::sourceBufferPrivateDidReceiveSample(MediaSample& sample)
 
         MediaTime microsecond(1, 1000000);
 
-        auto roundTowardsTimeScaleWithRoundingMargin = [] (const MediaTime& time, uint32_t timeScale, const MediaTime& roundingMargin) {
-            while (true) {
-                MediaTime roundedTime = time.toTimeScale(timeScale);
-                if (abs(roundedTime - time) < roundingMargin || timeScale >= MediaTime::MaximumTimeScale)
-                    return roundedTime;
-
-                if (!WTF::safeMultiply(timeScale, 2, timeScale) || timeScale > MediaTime::MaximumTimeScale)
-                    timeScale = MediaTime::MaximumTimeScale;
-            }
-        };
-
         // 1.4 If timestampOffset is not 0, then run the following steps:
         if (m_timestampOffset) {
             if (!trackBuffer.roundedTimestampOffset.isValid() || presentationTimestamp.timeScale() != trackBuffer.lastFrameTimescale) {
@@ -1628,7 +1694,7 @@ void SourceBuffer::sourceBufferPrivateDidReceiveSample(MediaSample& sample)
         // ↳ If last decode timestamp for track buffer is set and the difference between decode timestamp and
         // last decode timestamp is greater than 2 times last frame duration:
         if (trackBuffer.lastDecodeTimestamp.isValid() && (decodeTimestamp < trackBuffer.lastDecodeTimestamp
-            || (trackBuffer.greatestDecodeDuration.isValid() && abs(decodeTimestamp - trackBuffer.lastDecodeTimestamp) > (trackBuffer.greatestDecodeDuration * 2)))) {
+            || (trackBuffer.greatestDecodeDuration.isValid() && (decodeTimestamp - trackBuffer.lastDecodeTimestamp) > (trackBuffer.greatestDecodeDuration * 2)))) {
 
             // 1.6.1:
             if (m_mode == AppendMode::Segments) {
@@ -2117,7 +2183,8 @@ void SourceBuffer::provideMediaData(TrackBuffer& trackBuffer, const AtomicString
         // Remove the sample from the decode queue now.
         trackBuffer.decodeQueue.erase(trackBuffer.decodeQueue.begin());
 
-        trackBuffer.lastEnqueuedPresentationTime = sample->presentationTime();
+        if (trackBuffer.lastEnqueuedPresentationTime.isInvalid() || sample->presentationTime() > trackBuffer.lastEnqueuedPresentationTime)
+            trackBuffer.lastEnqueuedPresentationTime = sample->presentationTime();
         trackBuffer.lastEnqueuedDecodeKey = {sample->decodeTime(), sample->presentationTime()};
         trackBuffer.lastEnqueuedDecodeDuration = sample->duration();
         m_private->enqueueSample(sample.releaseNonNull(), trackID);
@@ -2236,6 +2303,7 @@ void SourceBuffer::updateBufferedFromTrackBuffers()
     // a single range of {0, 0}.
     if (highestEndTime.isNegativeInfinite()) {
         m_buffered->ranges() = PlatformTimeRanges();
+        setBufferedDirty(true);
         return;
     }
 
@@ -2307,9 +2375,9 @@ void SourceBuffer::reportExtraMemoryAllocated()
         return;
 
     size_t extraMemoryCostDelta = extraMemoryCost - m_reportedExtraMemoryCost;
-    m_reportedExtraMemoryCost = extraMemoryCost;
 
     JSC::JSLockHolder lock(scriptExecutionContext()->vm());
+    m_reportedExtraMemoryCost = extraMemoryCost;
     // FIXME: Adopt reportExtraMemoryVisited, and switch to reportExtraMemoryAllocated.
     // https://bugs.webkit.org/show_bug.cgi?id=142595
     scriptExecutionContext()->vm().heap.deprecatedReportExtraMemory(extraMemoryCostDelta);
@@ -2376,6 +2444,16 @@ ExceptionOr<void> SourceBuffer::setMode(AppendMode newMode)
     m_mode = newMode;
 
     return { };
+}
+
+size_t SourceBuffer::memoryCost() const
+{
+    return sizeof(SourceBuffer) + m_reportedExtraMemoryCost;
+}
+
+void SourceBuffer::useEncryptedContentSizeLimits()
+{
+    m_useClearContentLimits = false;
 }
 
 } // namespace WebCore

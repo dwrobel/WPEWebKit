@@ -34,8 +34,11 @@
 #include <wtf/Forward.h>
 #include <wtf/Optional.h>
 #include <wtf/RefCounted.h>
+#include <wtf/ThreadSafeRefCounted.h>
 #include <wtf/TypeCasts.h>
 #include <wtf/Vector.h>
+
+#include "MediaPlayerGStreamerEncryptedPlayTracker.h"
 
 namespace WebCore {
 
@@ -54,7 +57,7 @@ public:
     virtual void issueMessage(MessageType, Ref<SharedBuffer>&&) = 0;
 };
 
-class CDMInstance : public RefCounted<CDMInstance> {
+class CDMInstance : public ThreadSafeRefCounted<CDMInstance> {
 public:
     virtual ~CDMInstance() = default;
 
@@ -123,6 +126,20 @@ public:
     virtual void storeRecordOfKeyUsage(const String& sessionId) = 0;
 
     virtual const String& keySystem() const = 0;
+
+    void setTracker(RefPtr<MediaPlayerGStreamerEncryptedPlayTracker> tracker) {
+        if(m_tracker != tracker) {
+            m_tracker = tracker;
+
+            if(tracker)
+                tracker->setKeySystem(keySystem());
+        }
+    }
+
+    RefPtr<MediaPlayerGStreamerEncryptedPlayTracker> getTracker() { return m_tracker; }
+
+private:
+    RefPtr<MediaPlayerGStreamerEncryptedPlayTracker> m_tracker;
 };
 
 } // namespace WebCore

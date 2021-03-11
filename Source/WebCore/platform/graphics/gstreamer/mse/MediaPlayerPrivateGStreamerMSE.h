@@ -93,6 +93,10 @@ public:
     void dispatchDecryptionStructure(GUniquePtr<GstStructure>&&) final;
 #endif
 
+   MediaTime maxTimeLoaded() const override;
+
+   bool gstSeekCompleted() const { return m_gstSeekCompleted; }
+
 private:
     static void getSupportedTypes(HashSet<String, ASCIICaseInsensitiveHash>&);
     static MediaPlayer::SupportsType supportsType(const MediaEngineSupportParameters&);
@@ -129,6 +133,9 @@ private:
     MediaTime m_mediaTimeDuration;
     bool m_mseSeekCompleted = true;
     RefPtr<PlaybackPipeline> m_playbackPipeline;
+    bool m_didLogRebufferingOnce { false };
+    URL m_url;
+    bool m_didFirstSeek = false;
 };
 
 } // namespace WebCore

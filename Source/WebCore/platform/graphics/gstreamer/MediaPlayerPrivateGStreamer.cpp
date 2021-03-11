@@ -83,12 +83,41 @@
 #include "AudioSourceProviderGStreamer.h"
 #endif
 
+#include "MediaPlayerPrivateGStreamerMSE.h"
+
 GST_DEBUG_CATEGORY_EXTERN(webkit_media_player_debug);
 #define GST_CAT_DEFAULT webkit_media_player_debug
 
+#if ENABLE(ENCRYPTED_MEDIA)
+#include "CDMInstance.h"
+#endif
 
 namespace WebCore {
 using namespace std;
+
+MonotonicTime gEnterKeyDownTime;
+
+void noticeEnterKeyDownEvent()
+{
+    gEnterKeyDownTime = WTF::MonotonicTime::now();
+}
+
+void noticeFirstVideoFrame()
+{
+    if (gEnterKeyDownTime)
+    {
+        auto diffTime = WTF::MonotonicTime::now() - gEnterKeyDownTime;
+        gEnterKeyDownTime = MonotonicTime();
+        WTFLogAlways("Media: browse-to-watch = %.2f ms\n", diffTime.milliseconds());
+    }
+}
+
+#if USE(WESTEROS_SINK)
+static void onFirstVideoFrameCallback(MediaPlayerPrivateGStreamer* /*player*/)
+{
+    noticeFirstVideoFrame();
+}
+#endif
 
 static void busMessageCallback(GstBus*, GstMessage* message, MediaPlayerPrivateGStreamer* player)
 {
@@ -135,6 +164,7 @@ MediaPlayerPrivateGStreamer::MediaPlayerPrivateGStreamer(MediaPlayer* player)
     , m_buffering(false)
     , m_bufferingPercentage(0)
     , m_cachedPosition(MediaTime::invalidTime())
+    , m_playbackProgress(MediaTime::zeroTime())
     , m_canFallBackToLastFinishedSeekPosition(false)
     , m_changingRate(false)
     , m_downloadFinished(false)
@@ -170,11 +200,22 @@ MediaPlayerPrivateGStreamer::MediaPlayerPrivateGStreamer(MediaPlayer* player)
 #if USE(GLIB)
     m_readyTimerHandler.setPriority(G_PRIORITY_DEFAULT_IDLE);
 #endif
+
+#if ENABLE(ENCRYPTED_MEDIA)
+    m_tracker = MediaPlayerGStreamerEncryptedPlayTracker::create();
+#endif
 }
 
 MediaPlayerPrivateGStreamer::~MediaPlayerPrivateGStreamer()
 {
     GST_DEBUG("Disposing player");
+
+#if ENABLE(ENCRYPTED_MEDIA)
+        if(m_cdmInstance) {
+            const_cast<CDMInstance*>(m_cdmInstance.get())->setTracker(nullptr);
+            m_tracker = nullptr;
+        }
+#endif
 
 #if ENABLE(VIDEO_TRACK)
     for (auto& track : m_audioTracks.values())
@@ -216,6 +257,9 @@ MediaPlayerPrivateGStreamer::~MediaPlayerPrivateGStreamer()
     if (m_videoSink) {
         GRefPtr<GstPad> videoSinkPad = adoptGRef(gst_element_get_static_pad(m_videoSink.get(), "sink"));
         g_signal_handlers_disconnect_matched(videoSinkPad.get(), G_SIGNAL_MATCH_DATA, 0, 0, nullptr, nullptr, this);
+#if USE(WESTEROS_SINK)
+        g_signal_handlers_disconnect_by_func(G_OBJECT(m_videoSink.get()), reinterpret_cast<gpointer>(onFirstVideoFrameCallback), this);
+#endif
     }
 
     if (m_pipeline) {
@@ -245,6 +289,9 @@ void MediaPlayerPrivateGStreamer::setPlaybinURL(const URL& url)
 
     m_url = URL(URL(), cleanURLString);
     convertToInternalProtocol(m_url);
+#if ENABLE(ENCRYPTED_MEDIA)
+    m_tracker->setURL(m_url.string());
+#endif
 
     GST_INFO("Load %s", m_url.string().utf8().data());
     g_object_set(m_pipeline.get(), "uri", m_url.string().utf8().data(), nullptr);
@@ -353,6 +400,7 @@ MediaTime MediaPlayerPrivateGStreamer::playbackPosition() const
 {
 
     if (m_isEndReached) {
+        m_playbackProgress = MediaTime::zeroTime();
         // Position queries on a null pipeline return 0. If we're at
         // the end of the stream the pipeline is null but we want to
         // report either the seek time or the duration because this is
@@ -371,6 +419,7 @@ MediaTime MediaPlayerPrivateGStreamer::playbackPosition() const
         return m_cachedPosition;
 
     m_lastQueryTime = now;
+    m_playbackProgress = MediaTime::zeroTime();
 
     // Position is only available if no async state change is going on and the state is either paused or playing.
     gint64 position = GST_CLOCK_TIME_NONE;
@@ -401,6 +450,7 @@ MediaTime MediaPlayerPrivateGStreamer::playbackPosition() const
     else if (m_canFallBackToLastFinishedSeekPosition)
         playbackPosition = m_seekTime;
 
+    m_playbackProgress = m_cachedPosition.isValid() ? abs(playbackPosition - m_cachedPosition) : playbackPosition;
     m_cachedPosition = playbackPosition;
     return playbackPosition;
 }
@@ -1256,25 +1306,34 @@ void MediaPlayerPrivateGStreamer::handleMessage(GstMessage* message)
 
         GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS(GST_BIN(m_pipeline.get()), GST_DEBUG_GRAPH_SHOW_ALL, "webkit-video.error");
 
+        m_errorMessage = err->message;
         error = MediaPlayer::Empty;
         if (g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_CODEC_NOT_FOUND)
+            || g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_DECRYPT)
+            || g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_DECRYPT_NOKEY)
             || g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_WRONG_TYPE)
             || g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_FAILED)
             || g_error_matches(err.get(), GST_CORE_ERROR, GST_CORE_ERROR_MISSING_PLUGIN)
-            || g_error_matches(err.get(), GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_NOT_FOUND))
+            || g_error_matches(err.get(), GST_CORE_ERROR, GST_CORE_ERROR_PAD)
+            || g_error_matches(err.get(), GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_NOT_FOUND)) {
+            fprintf(stderr, "HTML5 video: Playback failed: Format error [%s]\n",m_url.string().utf8().data());
             error = MediaPlayer::FormatError;
+        }
         else if (g_error_matches(err.get(), GST_STREAM_ERROR, GST_STREAM_ERROR_TYPE_NOT_FOUND)) {
             // Let the mediaPlayerClient handle the stream error, in
             // this case the HTMLMediaElement will emit a stalled
             // event.
+            fprintf(stderr, "HTML5 video: Playback failed: Decode error [%s]\n",m_url.string().utf8().data());
             GST_ERROR("Decode error, let the Media element emit a stalled event.");
             m_loadingStalled = true;
             break;
         } else if (err->domain == GST_STREAM_ERROR) {
             error = MediaPlayer::DecodeError;
             attemptNextLocation = true;
-        } else if (err->domain == GST_RESOURCE_ERROR)
+        } else if (err->domain == GST_RESOURCE_ERROR) {
+            fprintf(stderr, "HTML5 video: Playback failed: Network error [%s]\n",m_url.string().utf8().data());
             error = MediaPlayer::NetworkError;
+        }
 
         if (attemptNextLocation)
             issueError = !loadNextLocation();
@@ -1288,6 +1347,8 @@ void MediaPlayerPrivateGStreamer::handleMessage(GstMessage* message)
         break;
     case GST_MESSAGE_EOS:
         didEnd();
+        fprintf(stderr, "HTML5 video: End of Stream [%s]\n",m_url.string().utf8().data());
+        m_reportedPlaybackEOS = true;
         break;
     case GST_MESSAGE_ASYNC_DONE:
         if (!messageSourceIsPlaybin || m_delayingLoad)
@@ -1328,6 +1389,9 @@ void MediaPlayerPrivateGStreamer::handleMessage(GstMessage* message)
             gst_element_state_get_name(currentState), gst_element_state_get_name(newState)).utf8();
         GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS(GST_BIN(m_pipeline.get()), GST_DEBUG_GRAPH_SHOW_ALL, dotFileName.data());
         GST_INFO("Playbin changed %s --> %s", gst_element_state_get_name(currentState), gst_element_state_get_name(newState));
+#if ENABLE(ENCRYPTED_MEDIA)
+        m_tracker->notifyStateChange(currentState, newState);
+#endif
         break;
     }
     case GST_MESSAGE_BUFFERING:
@@ -1427,6 +1491,10 @@ void MediaPlayerPrivateGStreamer::handleMessage(GstMessage* message)
             else if (gst_structure_has_name(structure, "drm-initialization-data-encountered")) {
                 GST_DEBUG("drm-initialization-data-encountered message from %s", GST_MESSAGE_SRC_NAME(message));
                 handleProtectionStructure(structure);
+            }
+            else if (gst_structure_has_name(structure, "drm-decryption-error-encountered")) {
+                GST_DEBUG("drm-decryption-error-encountered message from %s", GST_MESSAGE_SRC_NAME(message));
+                handleDecryptionError(structure);
             }
 #endif
             else
@@ -1918,15 +1986,17 @@ void MediaPlayerPrivateGStreamer::sourceSetup(GstElement* sourceElement)
     if (WEBKIT_IS_WEB_SRC(m_source.get())) {
         webKitWebSrcSetMediaPlayer(WEBKIT_WEB_SRC(m_source.get()), m_player);
         g_signal_connect(GST_ELEMENT_PARENT(m_source.get()), "element-added", G_CALLBACK(uriDecodeBinElementAddedCallback), this);
-#if ENABLE(MEDIA_STREAM) && GST_CHECK_VERSION(1, 10, 0)
-    } else if (WEBKIT_IS_MEDIA_STREAM_SRC(sourceElement)) {
-        auto stream = m_streamPrivate.get();
-        ASSERT(stream);
-        webkitMediaStreamSrcSetStream(WEBKIT_MEDIA_STREAM_SRC(sourceElement), stream);
-#endif
     }
 #else
     // TODO: set HTTP headers on source element here.
+#endif
+
+#if ENABLE(MEDIA_STREAM) && GST_CHECK_VERSION(1, 10, 0)
+    if (WEBKIT_IS_MEDIA_STREAM_SRC(sourceElement)) {
+        auto stream = m_streamPrivate.get();
+        ASSERT(stream);
+        webkitMediaStreamSrcSetStream(WEBKIT_MEDIA_STREAM_SRC(sourceElement), stream);
+    }
 #endif
 }
 
@@ -2180,6 +2250,39 @@ bool MediaPlayerPrivateGStreamer::handleSyncMessage(GstMessage* message)
 
     return MediaPlayerPrivateGStreamerBase::handleSyncMessage(message);
 }
+
+#if ENABLE(ENCRYPTED_MEDIA)
+void MediaPlayerPrivateGStreamer::handleDecryptionError(const GstStructure* structure)
+{
+    ASSERT(isMainThread());
+
+    if (gst_structure_has_field_typed(structure, "error-message", G_TYPE_STRING)) {
+        const gchar* errorMessage = gst_structure_get_string(structure, "error-message");
+        m_errorMessage = errorMessage;
+    }
+
+    GST_WARNING("scheduling decryptionErrorEncountered event");
+    fprintf(stderr, "HTML5 video: Playback failed: Decryption error [%s]\n", m_url.string().utf8().data());
+    loadingFailed(MediaPlayer::FormatError);
+    m_player->decryptErrorEncountered(); // override the error code
+}
+
+void MediaPlayerPrivateGStreamer::cdmInstanceAttached(CDMInstance& instance)
+{
+    if(m_cdmInstance.get() != &instance && m_cdmInstance)
+        const_cast<CDMInstance*>(m_cdmInstance.get())->setTracker(nullptr);
+    MediaPlayerPrivateGStreamerBase::cdmInstanceAttached(instance);
+    if (m_cdmInstance)
+        const_cast<CDMInstance*>(m_cdmInstance.get())->setTracker(m_tracker);
+}
+
+void MediaPlayerPrivateGStreamer::cdmInstanceDetached(CDMInstance& instance)
+{
+    if(m_cdmInstance)
+        const_cast<CDMInstance*>(m_cdmInstance.get())->setTracker(nullptr);
+    MediaPlayerPrivateGStreamerBase::cdmInstanceDetached(instance);
+}
+#endif
 
 void MediaPlayerPrivateGStreamer::mediaLocationChanged(GstMessage* message)
 {
@@ -2498,6 +2601,14 @@ MediaPlayer::SupportsType MediaPlayerPrivateGStreamer::supportsType(const MediaE
     if (mimeTypeSet().contains(parameters.type.containerType()))
         result = parameters.type.codecs().isEmpty() ? MediaPlayer::MayBeSupported : MediaPlayer::IsSupported;
 
+#if PLATFORM(BROADCOM)
+    if (result != MediaPlayer::IsNotSupported && AtomicString("video/webm") == parameters.type.containerType()) {
+        Vector<String> codecs = parameters.type.codecs();
+        if (codecs.isEmpty() || !MediaPlayerPrivateGStreamerMSE::supportsAllCodecs(codecs))
+            result = MediaPlayer::IsNotSupported;
+    }
+#endif
+
     return extendedSupportsType(parameters, result);
 }
 
@@ -2731,6 +2842,7 @@ void MediaPlayerPrivateGStreamer::createGSTPlayBin(const gchar* playbinName, con
 
     g_object_set(m_pipeline.get(), "mute", m_player->muted(), nullptr);
 
+    g_signal_connect_swapped(m_pipeline.get(), "element-setup", G_CALLBACK(elementSetupCallback), this);
     g_signal_connect_swapped(m_pipeline.get(), "source-setup", G_CALLBACK(sourceSetupCallback), this);
     if (m_isLegacyPlaybin) {
         g_signal_connect_swapped(m_pipeline.get(), "video-changed", G_CALLBACK(videoChangedCallback), this);
@@ -2767,6 +2879,20 @@ void MediaPlayerPrivateGStreamer::createGSTPlayBin(const gchar* playbinName, con
     GRefPtr<GstPad> videoSinkPad = adoptGRef(gst_element_get_static_pad(m_videoSink.get(), "sink"));
     if (videoSinkPad)
         g_signal_connect_swapped(videoSinkPad.get(), "notify::caps", G_CALLBACK(videoSinkCapsChangedCallback), this);
+#endif
+
+#if USE(WESTEROS_SINK)
+#if USE(SVP)
+    if (m_videoSink)
+        g_object_set(G_OBJECT(m_videoSink.get()), "secure-video",true, nullptr);
+#endif
+
+    if (m_videoSink)
+        g_signal_connect_swapped(m_videoSink.get(), "first-video-frame-callback", G_CALLBACK(onFirstVideoFrameCallback), this);
+
+    // configure westeros sink before it allocates resources
+    if (m_videoSink)
+        elementSetupCallback(this, m_videoSink.get(), m_pipeline.get());
 #endif
 
 #if !USE(WESTEROS_SINK) && !USE(FUSION_SINK)
@@ -2828,6 +2954,55 @@ bool MediaPlayerPrivateGStreamer::canSaveMediaData() const
         return true;
 
     return false;
+}
+
+void MediaPlayerPrivateGStreamer::elementSetupCallback(MediaPlayerPrivateGStreamer* player, GstElement* element, GstElement* /*pipeline*/)
+{
+    GST_DEBUG("Element set-up for %s", GST_ELEMENT_NAME(element));
+#if PLATFORM(BROADCOM)
+    if (g_str_has_prefix(GST_ELEMENT_NAME(element), "brcmaudiosink")) {
+        g_object_set(G_OBJECT(element), "async", TRUE, nullptr);
+    }
+#endif
+
+#if USE(WESTEROS_SINK)
+    static GstCaps *westerosSinkCaps = nullptr;
+    static GType westerosSinkType = G_TYPE_INVALID;
+    static std::once_flag onceFlag;
+    std::call_once(onceFlag, [] {
+        GRefPtr<GstElementFactory> westerosfactory = adoptGRef(gst_element_factory_find("westerossink"));
+        if (westerosfactory) {
+            westerosSinkType = gst_element_factory_get_element_type(westerosfactory.get());
+            for (auto *t = gst_element_factory_get_static_pad_templates(westerosfactory.get()); t != nullptr; t = g_list_next(t)) {
+               GstStaticPadTemplate *padtemplate = (GstStaticPadTemplate*)t->data;
+               if (padtemplate->direction != GST_PAD_SINK)
+                 continue;
+               if (westerosSinkCaps)
+                 westerosSinkCaps = gst_caps_merge(westerosSinkCaps, gst_static_caps_get (&padtemplate->static_caps));
+               else
+                 westerosSinkCaps = gst_static_caps_get (&padtemplate->static_caps);
+           }
+        }
+    });
+    if (G_TYPE_CHECK_INSTANCE_TYPE(G_OBJECT(element), westerosSinkType)) {
+#if ENABLE(MEDIA_STREAM)
+        if (player->m_streamPrivate != nullptr && g_object_class_find_property(G_OBJECT_GET_CLASS(element), "immediate-output")) {
+            GST_DEBUG("Enable 'immediate-output' in WesterosSink");
+            g_object_set (G_OBJECT(element), "immediate-output", TRUE, nullptr);
+        }
+#endif
+    }
+    // FIXME: Following is a hack needed to get westeros-sink working with playbin3.
+    //        Remove once XRE-15474 is fixed.
+    if (!player->m_isLegacyPlaybin && westerosSinkCaps && g_str_has_prefix(GST_ELEMENT_NAME(element), "decodebin3")) {
+        GstCaps* defaultCaps = nullptr;
+        g_object_get (element, "caps", &defaultCaps, NULL);
+        defaultCaps = gst_caps_merge(defaultCaps, gst_caps_ref(westerosSinkCaps));
+        g_object_set (element, "caps", defaultCaps, NULL);
+        GST_ERROR ("setting stop caps tp %" GST_PTR_FORMAT, defaultCaps);
+        gst_caps_unref(defaultCaps);
+    }
+#endif
 }
 
 }

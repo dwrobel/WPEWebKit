@@ -66,11 +66,12 @@ public:
     WTF_EXPORT_PRIVATE static MemoryPressureHandler& singleton();
 
     WTF_EXPORT_PRIVATE void install();
+    WTF_EXPORT_PRIVATE void uninstall();
 
     WTF_EXPORT_PRIVATE void setShouldUsePeriodicMemoryMonitor(bool);
 
 #if OS(LINUX)
-    WTF_EXPORT_PRIVATE void triggerMemoryPressureEvent(bool isCritical);
+    WTF_EXPORT_PRIVATE void triggerMemoryPressureEvent(bool isCritical, bool isSynchronous);
 #endif
 
     void setMemoryKillCallback(WTF::Function<void()>&& function) { m_memoryKillCallback = WTFMove(function); }
@@ -154,8 +155,6 @@ private:
     size_t thresholdForMemoryKill();
     void memoryPressureStatusChanged();
 
-    void uninstall();
-
     void holdOff(Seconds);
 
     MemoryPressureHandler();
@@ -175,7 +174,7 @@ private:
 
     unsigned m_pageCount { 0 };
 
-    bool m_installed { false };
+    std::atomic<bool> m_installed;
     LowMemoryHandler m_lowMemoryHandler;
 
     std::atomic<bool> m_underMemoryPressure;
@@ -198,6 +197,8 @@ private:
     RunLoop::Timer<MemoryPressureHandler> m_holdOffTimer;
     void holdOffTimerFired();
 
+    struct MemoryUsagePollerThreadContext;
+
     class MemoryUsagePoller {
         WTF_MAKE_NONCOPYABLE(MemoryUsagePoller); WTF_MAKE_FAST_ALLOCATED;
     public:
@@ -206,6 +207,7 @@ private:
 
     private:
         RefPtr<Thread> m_thread;
+        RefPtr<MemoryUsagePollerThreadContext> m_context;
     };
 
     std::unique_ptr<MemoryUsagePoller> m_memoryUsagePoller;

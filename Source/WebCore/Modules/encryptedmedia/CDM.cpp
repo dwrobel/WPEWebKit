@@ -64,10 +64,17 @@ CDM::CDM(Document& document, const String& keySystem)
     : ContextDestructionObserver(&document)
     , m_keySystem(keySystem)
 {
-    ASSERT(supportsKeySystem(keySystem));
+    SecurityOrigin& origin = document.securityOrigin();
+    if(origin.domain().endsWith(".amazonvideo.com") && keySystem.contains("playready"))
+    {
+        // change the keysystem for amazon prime video
+        m_keySystem = String("com.amazon.playready");
+    }
+
+    ASSERT(supportsKeySystem(m_keySystem));
     for (auto* factory : CDMFactory::registeredFactories()) {
-        if (factory->supportsKeySystem(keySystem)) {
-            m_private = factory->createCDM(keySystem);
+        if (factory->supportsKeySystem(m_keySystem)) {
+            m_private = factory->createCDM(m_keySystem);
             break;
         }
     }

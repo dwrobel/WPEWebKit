@@ -37,7 +37,7 @@
 #endif
 
 // NOTE: YouTube 2018 EME conformance tests expect this to be >=5s.
-const WTF::Seconds WEBCORE_GSTREAMER_EME_LICENSE_KEY_RESPONSE_TIMEOUT = WTF::Seconds(6);
+const WTF::Seconds WEBCORE_GSTREAMER_EME_LICENSE_KEY_RESPONSE_TIMEOUT = WTF::Seconds(60);
 
 namespace WebCore {
 
@@ -53,7 +53,7 @@ public:
 
 #if USE(OPENCDM)
     static const char* s_PlayReadyUUID;
-    static std::array<const char*, 2> s_PlayReadyKeySystems;
+    static std::array<const char*, 3> s_PlayReadyKeySystems;
 #endif
 
 #if USE(OPENCDM)
@@ -75,7 +75,8 @@ public:
     static bool isPlayReadyKeySystem(const String& keySystem)
     {
         return equalIgnoringASCIICase(keySystem, s_PlayReadyKeySystems[0])
-            || equalIgnoringASCIICase(keySystem, s_PlayReadyKeySystems[1]);
+            || equalIgnoringASCIICase(keySystem, s_PlayReadyKeySystems[1])
+            || equalIgnoringASCIICase(keySystem, s_PlayReadyKeySystems[2]);
     }
 
     static bool isWidevineKeySystem(const String& keySystem)

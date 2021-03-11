@@ -48,7 +48,7 @@ static bool webKitMediaOpenCDMDecryptorDecrypt(WebKitMediaCommonEncryptionDecryp
 static bool webKitMediaOpenCDMDecryptorHandleKeyId(WebKitMediaCommonEncryptionDecrypt* self, const WebCore::SharedBuffer&);
 static bool webKitMediaOpenCDMDecryptorAttemptToDecryptWithLocalInstance(WebKitMediaCommonEncryptionDecrypt* self, const WebCore::SharedBuffer&);
 
-static const char* cencEncryptionMediaTypes[] = { "video/mp4", "audio/mp4", "video/x-h264", "audio/mpeg", nullptr };
+static const char* cencEncryptionMediaTypes[] = { "video/mp4", "audio/mp4", "video/x-h264", "audio/mpeg", "audio/x-eac3", "audio/x-ac3", "video/x-h265", nullptr };
 static const char* webmEncryptionMediaTypes[] = { "video/webm", "audio/webm", "video/x-vp9", nullptr };
 
 static GstStaticPadTemplate srcTemplate = GST_STATIC_PAD_TEMPLATE("src",
@@ -60,7 +60,10 @@ static GstStaticPadTemplate srcTemplate = GST_STATIC_PAD_TEMPLATE("src",
         "video/mp4; "
         "audio/mp4; "
         "audio/mpeg; "
+        "audio/x-eac3; "
+        "audio/x-ac3; "
         "video/x-h264; "
+        "video/x-h265; "
         "video/x-vp9; "));
 
 GST_DEBUG_CATEGORY(webkit_media_opencdm_decrypt_debug_category);
@@ -145,6 +148,12 @@ static void webkit_media_opencdm_decrypt_init(WebKitOpenCDMDecrypt* self)
 static void webKitMediaOpenCDMDecryptorFinalize(GObject* object)
 {
     WebKitOpenCDMDecryptPrivate* priv = GST_WEBKIT_OPENCDM_DECRYPT_GET_PRIVATE(WEBKIT_OPENCDM_DECRYPT(object));
+
+    // Let OCDM sessions know playback has stopped
+    // output restrictions can be reset now
+    if(priv->m_openCdmSession)
+        opencdm_session_resetoutputprotection(priv->m_openCdmSession.get());
+
     priv->~WebKitOpenCDMDecryptPrivate();
     GST_CALL_PARENT(G_OBJECT_CLASS, finalize, (object));
 }
@@ -199,7 +208,7 @@ static bool webKitMediaOpenCDMDecryptorDecrypt(WebKitMediaCommonEncryptionDecryp
 
     GstMappedBuffer mappedKeyID(keyIDBuffer, GST_MAP_READ);
     if (!mappedKeyID) {
-        GST_ERROR_OBJECT(self, "Failed to map key ID buffer");
+        GST_ELEMENT_ERROR (self, STREAM, DECRYPT, ("Failed to map key ID buffer."), (NULL));
         return false;
     }
 
@@ -210,7 +219,7 @@ static bool webKitMediaOpenCDMDecryptorDecrypt(WebKitMediaCommonEncryptionDecryp
         auto& cdmInstanceOpenCDM = downcast<WebCore::CDMInstanceOpenCDM>(*cdmInstance);
         priv->m_openCdmSession.reset(opencdm_get_system_session(cdmInstanceOpenCDM.ocdmSystem(), mappedKeyID.data(), mappedKeyID.size(), WEBCORE_GSTREAMER_EME_LICENSE_KEY_RESPONSE_TIMEOUT.millisecondsAs<uint32_t>()));
         if (!priv->m_openCdmSession) {
-            GST_ERROR_OBJECT(self, "session is empty or unusable");
+            GST_ELEMENT_ERROR (self, STREAM, DECRYPT, ("Session is empty or unusable."), (NULL));
             return false;
         }
     }
@@ -218,7 +227,14 @@ static bool webKitMediaOpenCDMDecryptorDecrypt(WebKitMediaCommonEncryptionDecryp
     // Decrypt cipher.
     GST_TRACE_OBJECT(self, "decrypting");
     if (int errorCode = opencdm_gstreamer_session_decrypt(priv->m_openCdmSession.get(), buffer, subSamplesBuffer, subSampleCount, ivBuffer, keyIDBuffer, 0)) {
-        GST_ERROR_OBJECT(self, "subsample decryption failed, error code %d", errorCode);
+        GUniquePtr<gchar> errorMessage (g_strdup_printf("Subsample decryption failed (code=%d)", errorCode));
+        gst_element_post_message(
+            GST_ELEMENT(self),
+            gst_message_new_element(
+                GST_OBJECT(self),
+                gst_structure_new("drm-decryption-error-encountered",
+                                  "error-message", G_TYPE_STRING, errorMessage.get(), NULL)));
+        GST_ELEMENT_ERROR(self, STREAM, DECRYPT, ("%s", errorMessage.get()), (NULL));
         return false;
     }
 

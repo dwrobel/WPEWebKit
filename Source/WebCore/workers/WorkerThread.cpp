@@ -310,7 +310,11 @@ void WorkerThread::releaseFastMallocFreeMemoryInAllThreads()
     std::lock_guard<Lock> lock(threadSetMutex);
 
     for (auto* workerThread : workerThreads()) {
-        workerThread->runLoop().postTask([] (ScriptExecutionContext&) {
+        workerThread->runLoop().postTask([] (ScriptExecutionContext& context) {
+            JSC::JSLockHolder lock(context.vm());
+            if (!context.vm().heap.isCurrentThreadBusy()) {
+                context.vm().heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
+            }
             WTF::releaseFastMallocFreeMemory();
         });
     }
