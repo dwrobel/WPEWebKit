@@ -371,6 +371,15 @@ HashSet<HTMLMediaElement*>& HTMLMediaElement::allMediaElements()
     return elements;
 }
 
+void ForceStopMediaElements()
+{
+    for (auto* mediaElement : HTMLMediaElement::allMediaElements()) {
+        WTFLogAlways("Force stop '%s'", mediaElement->currentSrc().string().utf8().data());
+        ActiveDOMObject* obj = mediaElement;
+        obj->stop();
+    }
+}
+
 #if ENABLE(MEDIA_SESSION)
 typedef HashMap<uint64_t, HTMLMediaElement*> IDToElementMap;
 
@@ -471,7 +480,7 @@ HTMLMediaElement::HTMLMediaElement(const QualifiedName& tagName, Document& docum
     , m_playbackControlsManagerBehaviorRestrictionsTimer(*this, &HTMLMediaElement::playbackControlsManagerBehaviorRestrictionsTimerFired)
     , m_seekToPlaybackPositionEndedTimer(*this, &HTMLMediaElement::seekToPlaybackPositionEndedTimerFired)
     , m_asyncEventQueue(*this)
-    , m_lastTimeUpdateEventMovieTime(MediaTime::positiveInfiniteTime())
+    , m_lastTimeUpdateEventMovieTime(MediaTime::zeroTime())
     , m_firstTimePlaying(true)
     , m_playing(false)
     , m_isWaitingUntilMediaCanStart(false)
@@ -516,6 +525,21 @@ HTMLMediaElement::HTMLMediaElement(const QualifiedName& tagName, Document& docum
     , m_logIdentifier(nextLogIdentifier())
 #endif
 {
+    {
+        String host = document.url().host().toString();
+        if (host.endsWith(".youtube.com") ||
+            equalLettersIgnoringASCIICase(host, "www.youtube.com") ||
+            host.contains("yt-dash-mse-test") ||
+            host.contains("ytlr-cert"))
+            MediaPlayer::setYouTubeQuirksEnabled(true);
+        else
+            MediaPlayer::setYouTubeQuirksEnabled(false);
+
+        if (equalLettersIgnoringASCIICase(host, "www.dazn.com"))
+            MediaPlayer::setDAZNQuirksEnabled(true);
+        else
+            MediaPlayer::setDAZNQuirksEnabled(false);
+    }
     allMediaElements().add(this);
 
     ALWAYS_LOG(LOGIDENTIFIER);
@@ -2203,7 +2227,9 @@ void HTMLMediaElement::noneSupported()
 
     // 6.1 - Set the error attribute to a new MediaError object whose code attribute is set to
     // MEDIA_ERR_SRC_NOT_SUPPORTED.
-    m_error = MediaError::create(MediaError::MEDIA_ERR_SRC_NOT_SUPPORTED);
+    m_error = m_player
+        ? MediaError::create(MediaError::MEDIA_ERR_SRC_NOT_SUPPORTED, m_player->errorMessage())
+        : MediaError::create(MediaError::MEDIA_ERR_SRC_NOT_SUPPORTED);
 
     // 6.2 - Forget the media element's media-resource-specific text tracks.
     forgetResourceSpecificTracks();
@@ -2236,12 +2262,14 @@ void HTMLMediaElement::mediaLoadingFailedFatally(MediaPlayer::NetworkState error
     stopPeriodicTimers();
     m_loadState = WaitingForSource;
 
+    const auto getErrorMessage = [&] () { return m_player ? m_player->errorMessage() : emptyString(); };
+
     // 2 - Set the error attribute to a new MediaError object whose code attribute is
     // set to MEDIA_ERR_NETWORK/MEDIA_ERR_DECODE.
     if (error == MediaPlayer::NetworkError)
-        m_error = MediaError::create(MediaError::MEDIA_ERR_NETWORK);
+        m_error = MediaError::create(MediaError::MEDIA_ERR_NETWORK, getErrorMessage());
     else if (error == MediaPlayer::DecodeError)
-        m_error = MediaError::create(MediaError::MEDIA_ERR_DECODE);
+        m_error = MediaError::create(MediaError::MEDIA_ERR_DECODE, getErrorMessage());
     else
         ASSERT_NOT_REACHED();
 
@@ -2781,6 +2809,15 @@ void HTMLMediaElement::mediaPlayerInitializationDataEncountered(const String& in
     m_asyncEventQueue.enqueueEvent(MediaEncryptedEvent::create(eventNames().encryptedEvent, initializer, Event::IsTrusted::Yes));
 }
 
+void HTMLMediaElement::mediaPlayerDecryptErrorEncountered()
+{
+    m_error = m_player
+        ? MediaError::create(MediaError::MEDIA_ERR_ENCRYPTED, m_player->errorMessage())
+        : MediaError::create(MediaError::MEDIA_ERR_ENCRYPTED);
+    if (!m_asyncEventQueue.hasPendingEventsOfType(eventNames().errorEvent))
+        scheduleEvent(eventNames().errorEvent);
+}
+
 void HTMLMediaElement::attemptToDecrypt()
 {
     // https://w3c.github.io/encrypted-media/#attempt-to-decrypt
@@ -3059,7 +3096,8 @@ void HTMLMediaElement::seekTask()
         clearSeeking();
         return;
     }
-    time = seekableRanges->ranges().nearest(time);
+    if (seekableRanges->length())
+        time = seekableRanges->ranges().nearest(time);
 
     m_sentEndEvent = false;
     m_lastSeekTime = time;
@@ -3689,6 +3727,7 @@ ExceptionOr<void> HTMLMediaElement::setVolume(double volume)
         removeBehaviorsRestrictionsAfterFirstUserGesture(MediaElementSession::AllRestrictions & ~MediaElementSession::RequireUserGestureToControlControlsManager);
 
     m_volume = volume;
+    m_referenceVolume = m_volume;
     m_volumeInitialized = true;
     updateVolume();
     scheduleEvent(eventNames().volumechangeEvent);
@@ -4861,6 +4900,9 @@ void HTMLMediaElement::mediaPlayerVolumeChanged(MediaPlayer*)
         double vol = m_player->volume();
         if (vol != m_volume) {
             m_volume = vol;
+            Page* page = document().page();
+            if(!page || page->mediaVolume() == 1)
+                m_referenceVolume = vol;
             updateVolume();
             scheduleEvent(eventNames().volumechangeEvent);
         }
@@ -5264,6 +5306,7 @@ void HTMLMediaElement::updateVolume()
     float volume = m_player->volume();
     if (m_volume != volume) {
         m_volume = volume;
+        m_referenceVolume = volume;
         scheduleEvent(eventNames().volumechangeEvent);
     }
 #else
@@ -5284,7 +5327,7 @@ void HTMLMediaElement::updateVolume()
 #endif
 
         m_player->setMuted(shouldMute);
-        m_player->setVolume(m_volume * volumeMultiplier);
+        m_player->setVolume(m_referenceVolume * volumeMultiplier);
     }
 
 #if ENABLE(MEDIA_SESSION)
@@ -5718,7 +5761,7 @@ void HTMLMediaElement::visibilityStateChanged()
         m_player->setVisible(!m_elementIsHidden);
 
     bool isPlayingAudio = isPlaying() && hasAudio() && !muted() && volume();
-    if (!isPlayingAudio) {
+    if (true || !isPlayingAudio) {
         if (m_elementIsHidden) {
             ALWAYS_LOG(LOGIDENTIFIER, "Suspending playback after going to the background");
             m_mediaSession->beginInterruption(PlatformMediaSession::EnteringBackground);

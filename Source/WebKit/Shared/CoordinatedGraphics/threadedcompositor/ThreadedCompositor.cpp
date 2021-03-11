@@ -113,9 +113,15 @@ void ThreadedCompositor::invalidate()
 #if USE(REQUEST_ANIMATION_FRAME_DISPLAY_MONITOR)
     m_displayRefreshMonitor->invalidate();
 #endif
+    if (m_nonCompositedWebGLEnabled) {
+        m_scene->purgeGLResources();
+    }
     m_compositingRunLoop->performTaskSync([this, protectedThis = makeRef(*this)] {
-        if (!m_context || !m_context->makeContextCurrent())
+        if (!m_context || !m_context->makeContextCurrent()) {
+            m_client.didDestroyGLContext();
+            m_scene = nullptr;
             return;
+        }
         m_scene->purgeGLResources();
         m_context = nullptr;
         m_client.didDestroyGLContext();
@@ -202,6 +208,13 @@ void ThreadedCompositor::setDrawsBackground(bool drawsBackground)
     m_compositingRunLoop->scheduleUpdate();
 }
 
+void ThreadedCompositor::setIsVisible(bool v)
+{
+    LockHolder locker(m_attributes.lock);
+    m_attributes.isVisbile = v;
+    m_compositingRunLoop->scheduleUpdate();
+}
+
 void ThreadedCompositor::updateViewport()
 {
     m_compositingRunLoop->scheduleUpdate();
@@ -259,6 +272,7 @@ void ThreadedCompositor::renderLayerTree()
     float scaleFactor;
     bool drawsBackground;
     bool needsResize;
+    bool isVisbile;
     Vector<WebCore::CoordinatedGraphicsState> states;
 
     {
@@ -268,6 +282,7 @@ void ThreadedCompositor::renderLayerTree()
         scaleFactor = m_attributes.scaleFactor;
         drawsBackground = m_attributes.drawsBackground;
         needsResize = m_attributes.needsResize;
+        isVisbile = m_attributes.isVisbile;
 
         states = WTFMove(m_attributes.states);
 
@@ -298,12 +313,13 @@ void ThreadedCompositor::renderLayerTree()
     viewportTransform.scale(scaleFactor);
     viewportTransform.translate(-scrollPosition.x(), -scrollPosition.y());
 
-    if (!drawsBackground) {
+    if (!drawsBackground || !isVisbile) {
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
     }
 
     m_scene->applyStateChanges(states);
+    if (isVisbile)
     m_scene->paintToCurrentGLContext(viewportTransform, 1, FloatRect { FloatPoint { }, viewportSize },
         Color::transparent, !drawsBackground, m_paintFlags);
 

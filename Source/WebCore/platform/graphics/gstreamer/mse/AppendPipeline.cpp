@@ -45,6 +45,11 @@
 GST_DEBUG_CATEGORY_EXTERN(webkit_mse_debug);
 #define GST_CAT_DEFAULT webkit_mse_debug
 
+#if defined(NDEBUG)
+#undef LOG_DISABLED
+#define LOG_DISABLED 1
+#endif
+
 namespace WebCore {
 
 GType AppendPipeline::s_endOfAppendMetaType = 0;
@@ -123,6 +128,11 @@ static void appendPipelineStateChangeMessageCallback(GstBus*, GstMessage* messag
     appendPipeline->handleStateChangeMessage(message);
 }
 
+static void appendPipelineErrorMessageCallback(GstBus*, GstMessage* message, AppendPipeline* appendPipeline)
+{
+    appendPipeline->handleErrorMessage(message);
+}
+
 // Auxiliary class to compute the sample duration when GStreamer provides an invalid one.
 class BufferMetadataCompleter {
 public:
@@ -167,13 +177,13 @@ public:
             }
 
             // If the first sample (DTS=0) doesn't start with PTS=0, compute a negative offset.
-            if (!GST_BUFFER_DTS(buffer) && GST_BUFFER_PTS(buffer) && !m_ptsOffset.isValid()) {
+            if (!GST_BUFFER_DTS(buffer) && GST_BUFFER_PTS(buffer) /*&& !m_ptsOffset.isValid()*/) {
                 m_ptsOffset = MediaTime(GST_BUFFER_DTS(buffer), GST_SECOND) - MediaTime(GST_BUFFER_PTS(buffer), GST_SECOND);
                 GST_TRACE("Setting an offset of %s\n", m_ptsOffset.toString().utf8().data());
             }
 
             // Apply the offset to zero-align the first sample and also correct the next ones.
-            if (m_ptsOffset.isValid())
+            if (MediaPlayer::isYouTubeQuirksEnabled() && m_ptsOffset.isValid())
                 GST_BUFFER_PTS(buffer) += toGstClockTime(m_ptsOffset);
 
             m_lastPts = MediaTime(GST_BUFFER_PTS(buffer), GST_SECOND);
@@ -202,6 +212,7 @@ AppendPipeline::AppendPipeline(Ref<MediaSourceClientGStreamerMSE> mediaSourceCli
     , m_appendState(AppendState::NotStarted)
     , m_abortPending(false)
     , m_streamType(Unknown)
+    , m_allowedGap(MediaTime(1,10))
 {
     ASSERT(WTF::isMainThread());
     std::call_once(s_staticInitializationFlag, AppendPipeline::staticInitialization);
@@ -219,6 +230,7 @@ AppendPipeline::AppendPipeline(Ref<MediaSourceClientGStreamerMSE> mediaSourceCli
     g_signal_connect(m_bus.get(), "sync-message::need-context", G_CALLBACK(appendPipelineNeedContextMessageCallback), this);
     g_signal_connect(m_bus.get(), "message::application", G_CALLBACK(appendPipelineApplicationMessageCallback), this);
     g_signal_connect(m_bus.get(), "message::state-changed", G_CALLBACK(appendPipelineStateChangeMessageCallback), this);
+    g_signal_connect(m_bus.get(), "message::error", G_CALLBACK(appendPipelineErrorMessageCallback), this);
 
     // We assign the created instances here instead of adoptRef() because gst_bin_add_many()
     // below will already take the initial reference and we need an additional one for us.
@@ -396,6 +408,9 @@ void AppendPipeline::clearPlayerPrivate()
 
 void AppendPipeline::handleNeedContextSyncMessage(GstMessage* message)
 {
+    if (GST_MESSAGE_TYPE(message) != GST_MESSAGE_NEED_CONTEXT)
+        return;
+
     const gchar* contextType = nullptr;
     gst_message_parse_context_type(message, &contextType);
     GST_TRACE("context type: %s", contextType);
@@ -495,6 +510,19 @@ void AppendPipeline::handleStateChangeMessage(GstMessage* message)
     }
 }
 
+void AppendPipeline::handleErrorMessage(GstMessage* message)
+{
+    ASSERT(WTF::isMainThread());
+    GUniqueOutPtr<GError> err;
+    GUniqueOutPtr<gchar> debug;
+    gst_message_parse_error(message, &err.outPtr(), &debug.outPtr());
+    GST_ERROR("Error %d: %s", err->code, err->message);
+    if (m_appendState != AppendState::Invalid) {
+        setAppendState(AppendState::Invalid);
+        m_sourceBufferPrivate->didFailParsing();
+    }
+}
+
 gint AppendPipeline::id()
 {
     ASSERT(WTF::isMainThread());
@@ -580,11 +608,12 @@ void AppendPipeline::setAppendState(AppendState newAppendState)
         case AppendState::DataStarve:
             ok = true;
             GST_DEBUG("received all pending samples");
-            m_sourceBufferPrivate->didReceiveAllPendingSamples();
             if (m_abortPending)
                 nextAppendState = AppendState::Aborting;
-            else
+            else{
+                m_sourceBufferPrivate->didReceiveAllPendingSamples();
                 nextAppendState = AppendState::NotStarted;
+            }
             break;
         default:
             break;
@@ -613,11 +642,12 @@ void AppendPipeline::setAppendState(AppendState newAppendState)
         case AppendState::LastSample:
             ok = true;
             GST_DEBUG("received all pending samples");
-            m_sourceBufferPrivate->didReceiveAllPendingSamples();
             if (m_abortPending)
                 nextAppendState = AppendState::Aborting;
-            else
+            else {
+                m_sourceBufferPrivate->didReceiveAllPendingSamples();
                 nextAppendState = AppendState::NotStarted;
+            }
             break;
         default:
             break;
@@ -780,20 +810,35 @@ void AppendPipeline::appsinkNewSample(GRefPtr<GstSample>&& sample)
 
     // If we're beyond the duration, ignore this sample and the remaining ones.
     MediaTime duration = m_mediaSourceClient->duration();
-    if (duration.isValid() && !duration.indefiniteTime() && mediaSample->presentationTime() > duration) {
+    if (MediaPlayer::isYouTubeQuirksEnabled() && duration.isValid() && !duration.indefiniteTime() && mediaSample->presentationTime() > duration) {
         GST_DEBUG("Detected sample (%s) beyond the duration (%s), declaring LastSample", mediaSample->presentationTime().toString().utf8().data(), duration.toString().utf8().data());
         setAppendState(AppendState::LastSample);
         return;
     }
 
     // Add a gap sample if a gap is detected before the first sample.
-    if (mediaSample->decodeTime() == MediaTime::zeroTime() && mediaSample->presentationTime() > MediaTime::zeroTime() && mediaSample->presentationTime() <= MediaTime(1, 10)) {
-        GST_DEBUG("Adding gap offset");
-        mediaSample->applyPtsOffset(MediaTime::zeroTime());
+    if (mediaSample->decodeTime() == MediaTime::zeroTime()
+        && mediaSample->presentationTime() > MediaTime::zeroTime()) {
+        if( mediaSample->presentationTime() <= MediaTime(1, 10)) {
+            GST_DEBUG("Adding gap offset 0.1");
+            m_allowedGap = MediaTime(1,10);
+        } else if (mediaSample->presentationTime() <= MediaTime(2, 10)) {
+            GST_WARNING("Adding gap offset 0.2");
+            m_allowedGap = MediaTime(2,10);
+        } else {
+            GST_ERROR("Sample Gap greater then 0.2 sec");
+        }
+        if (MediaPlayer::isYouTubeQuirksEnabled() && mediaSample->presentationTime() <= MediaTime(2, 10))
+            mediaSample->applyPtsOffset(MediaTime::zeroTime());
     }
 
     m_sourceBufferPrivate->didReceiveSample(*mediaSample);
     setAppendState(AppendState::Sampling);
+}
+
+MediaTime& AppendPipeline::allowedGap()
+{
+    return m_allowedGap;
 }
 
 void AppendPipeline::appsinkEOS()
@@ -820,11 +865,13 @@ void AppendPipeline::appsinkEOS()
 void AppendPipeline::didReceiveInitializationSegment()
 {
     ASSERT(WTF::isMainThread());
+    if (m_abortPending)
+        return;
 
     WebCore::SourceBufferPrivateClient::InitializationSegment initializationSegment;
 
     GST_DEBUG("Notifying SourceBuffer for track %s", (m_track) ? m_track->id().string().utf8().data() : nullptr);
-    initializationSegment.duration = m_mediaSourceClient->duration();
+    initializationSegment.duration = m_initialDuration.isValid() ? m_initialDuration : m_mediaSourceClient->duration();
 
     switch (m_streamType) {
     case Audio: {
@@ -906,7 +953,22 @@ void AppendPipeline::abort()
     m_abortPending = true;
     if (m_appendState == AppendState::NotStarted)
         setAppendState(AppendState::Aborting);
-    // Else, the automatic state transitions will take care when the ongoing append finishes.
+    else {
+        // Wait for append state change
+        for (int i = 0; m_appendState == AppendState::Ongoing && i < 100; ++i) {
+            drainBusIfNeeded();
+            WTF::sleep(10_ms);
+        }
+        // Drain samples before source buffer state is reset
+        if (m_appendState == AppendState::Sampling) {
+            GRefPtr<GstPad> appsrcPad = adoptGRef(gst_element_get_static_pad(m_appsrc.get(), "src"));
+            if (appsrcPad) {
+                GRefPtr<GstQuery> query = adoptGRef(gst_query_new_drain());
+                gst_pad_peer_query(appsrcPad.get(), query.get());
+            }
+            drainBusIfNeeded();
+        }
+    }
 }
 
 GstFlowReturn AppendPipeline::pushNewBuffer(GstBuffer* buffer)
@@ -978,6 +1040,9 @@ GstFlowReturn AppendPipeline::handleNewAppsinkSample(GstElement* appsink)
 static GRefPtr<GstElement>
 createOptionalParserForFormat(GstPad* demuxerSrcPad)
 {
+#if 1 // PLATFORM(BROADCOM)
+    return nullptr;
+#endif
     GRefPtr<GstCaps> padCaps = adoptGRef(gst_pad_get_current_caps(demuxerSrcPad));
     GstStructure* structure = gst_caps_get_structure(padCaps.get(), 0);
     const char* mediaType = gst_structure_get_name(structure);
@@ -1155,9 +1220,6 @@ void AppendPipeline::connectDemuxerSrcPadToAppsink(GstPad* demuxerSrcPad)
     }
 #endif
 
-    if (m_mediaSourceClient->duration().isInvalid() && m_initialDuration > MediaTime::zeroTime())
-        m_mediaSourceClient->durationChanged(m_initialDuration);
-
     parseDemuxerSrcPadCaps(gst_caps_ref(caps.get()));
 
     switch (m_streamType) {
@@ -1255,6 +1317,24 @@ void AppendPipeline::appendPipelineDemuxerNoMorePadsFromAnyThread()
     GstMessage* message = gst_message_new_application(GST_OBJECT(m_appsrc.get()), structure);
     gst_bus_post(m_bus.get(), message);
     GST_TRACE("appendPipelineDemuxerNoMorePadsFromAnyThread - posted to bus");
+}
+
+void AppendPipeline::drainBusIfNeeded()
+{
+    if (m_appendState == AppendState::Invalid || m_appendState == AppendState::NotStarted)
+        return;
+
+    GstBus *bus = m_bus.get();
+    if (UNLIKELY (bus == nullptr))
+        return;
+
+    while(gst_bus_have_pending(bus)) {
+        GstMessage *message = gst_bus_pop(bus);
+        if (UNLIKELY (message == nullptr))
+            break;
+        gst_bus_async_signal_func(bus, message, nullptr);
+        gst_message_unref (message);
+    }
 }
 
 static void appendPipelineAppsinkCapsChanged(GObject* appsinkPad, GParamSpec*, AppendPipeline* appendPipeline)
@@ -1356,6 +1436,7 @@ void AppendPipeline::demuxerIsDoneSendingProtectionEvents(const GstStructure* st
     for (unsigned i = 0; i < streamEncryptionEventsListSize; ++i)
         protectionEvents.uncheckedAppend(static_cast<GstEvent*>(g_value_get_boxed(gst_value_list_get_value(streamEncryptionEventsList, i))));
     m_playerPrivate->handleProtectionEvents(protectionEvents);
+    m_sourceBufferPrivate->useEncryptedContentSizeLimits();
 }
 #endif
 

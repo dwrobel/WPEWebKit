@@ -217,6 +217,11 @@ void ChildProcess::shutDown()
     terminate();
 }
 
+void ChildProcess::releaseMemory()
+{
+    MemoryPressureHandler::singleton().releaseMemory(Critical::Yes, Synchronous::Yes);
+}
+
 void ChildProcess::registerURLSchemeServiceWorkersCanHandle(const String& urlScheme) const
 {
     WebCore::SchemeRegistry::registerURLSchemeServiceWorkersCanHandle(urlScheme);
@@ -240,7 +245,7 @@ void ChildProcess::didReceiveInvalidMessage(IPC::Connection&, IPC::StringReferen
 #if OS(LINUX)
 void ChildProcess::didReceiveMemoryPressureEvent(bool isCritical)
 {
-    MemoryPressureHandler::singleton().triggerMemoryPressureEvent(isCritical);
+    MemoryPressureHandler::singleton().triggerMemoryPressureEvent(isCritical, isCritical);
 }
 #endif
 

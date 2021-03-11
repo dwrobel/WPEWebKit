@@ -1174,7 +1174,7 @@ void MediaPlayer::networkStateChanged()
     // let the next engine try.
     if (m_private->networkState() >= FormatError && m_private->readyState() < HaveMetadata) {
         client().mediaPlayerEngineFailedToLoad();
-        if (installedMediaEngines().size() > 1 && (m_contentType.isEmpty() || nextBestMediaEngine(m_currentMediaEngine))) {
+        if (installedMediaEngines().size() > 1 && !m_contentType.isEmpty() && nextBestMediaEngine(m_currentMediaEngine)) {
             m_reloadTimer.startOneShot(0_s);
             return;
         }
@@ -1280,6 +1280,11 @@ String MediaPlayer::mediaKeysStorageDirectory() const
 void MediaPlayer::initializationDataEncountered(const String& initDataType, RefPtr<ArrayBuffer>&& initData)
 {
     client().mediaPlayerInitializationDataEncountered(initDataType, WTFMove(initData));
+}
+
+void MediaPlayer::decryptErrorEncountered()
+{
+    client().mediaPlayerDecryptErrorEncountered();
 }
 #endif
 
@@ -1617,6 +1622,40 @@ String convertEnumerationToString(MediaPlayerEnums::Preload enumerationValue)
     return values[static_cast<size_t>(enumerationValue)];
 }
 
+String MediaPlayer::errorMessage() const
+{
+    return m_private->errorMessage();
+}
+
+}
+
+namespace WebCore {
+
+namespace
+{
+bool gYouTubeQuirksEnabled = false;
+bool gDAZNQuirksEnabled = false;
+}
+
+void MediaPlayer::setYouTubeQuirksEnabled(bool enabled)
+{
+    gYouTubeQuirksEnabled = enabled;
+}
+
+bool MediaPlayer::isYouTubeQuirksEnabled()
+{
+    static bool enableYTQuirks = !!getenv("WPE_ENABLE_YT_MSE_HACKS");
+    return gYouTubeQuirksEnabled || enableYTQuirks;
+}
+void MediaPlayer::setDAZNQuirksEnabled(bool enabled)
+{
+    gDAZNQuirksEnabled = enabled;
+}
+
+bool MediaPlayer::isDAZNQuirksEnabled()
+{
+    return gDAZNQuirksEnabled;
+}
 }
 
 #endif

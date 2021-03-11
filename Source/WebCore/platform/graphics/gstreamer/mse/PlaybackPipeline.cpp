@@ -116,10 +116,16 @@ MediaSourcePrivate::AddStatus PlaybackPipeline::addSourceBuffer(RefPtr<SourceBuf
     stream->parent = m_webKitMediaSrc.get();
     stream->appsrc = gst_element_factory_make("appsrc", nullptr);
     stream->appsrcNeedDataFlag = false;
+    stream->busAlreadyNotifiedOfNeedDataFlag = false;
     stream->sourceBuffer = sourceBufferPrivate.get();
 
     // No track has been attached yet.
     stream->type = Invalid;
+#if ENABLE(ENCRYPTED_MEDIA)
+    stream->decryptor = nullptr;
+    stream->decryptorAttached = false;
+    stream->decryptorProbeId = 0;
+#endif
     stream->caps = nullptr;
     stream->audioTrack = nullptr;
     stream->videoTrack = nullptr;
@@ -166,6 +172,7 @@ void PlaybackPipeline::attachTrack(RefPtr<SourceBufferPrivateGStreamer> sourceBu
 
     GST_OBJECT_LOCK(webKitMediaSrc);
     Stream* stream = getStreamBySourceBufferPrivate(webKitMediaSrc, sourceBufferPrivate.get());
+    bool allTracksConfigured = webKitMediaSrc->priv->allTracksConfigured;
     GST_OBJECT_UNLOCK(webKitMediaSrc);
 
     ASSERT(stream);
@@ -215,7 +222,7 @@ void PlaybackPipeline::attachTrack(RefPtr<SourceBufferPrivateGStreamer> sourceBu
     if (signal != -1)
         g_signal_emit(G_OBJECT(stream->parent), webKitMediaSrcSignals[signal], 0, nullptr);
 
-    if (caps) {
+    if (caps && !allTracksConfigured) {
         // Set caps to trigger early pipeline initialization
         gst_app_src_set_caps(GST_APP_SRC(stream->appsrc), caps);
 
@@ -300,6 +307,25 @@ void PlaybackPipeline::markEndOfStream(MediaSourcePrivate::EndOfStreamStatus)
         gst_app_src_end_of_stream(appsrc);
 }
 
+GstPadProbeReturn segmentFixerProbe(GstPad*, GstPadProbeInfo* info, gpointer)
+{
+    GstEvent* event = GST_EVENT(info->data);
+
+    if (GST_EVENT_TYPE(event) != GST_EVENT_SEGMENT)
+        return GST_PAD_PROBE_OK;
+
+    GstSegment* segment = nullptr;
+    gst_event_parse_segment(event, const_cast<const GstSegment**>(&segment));
+
+    GST_TRACE("Fixed segment base time from %" GST_TIME_FORMAT " to %" GST_TIME_FORMAT,
+        GST_TIME_ARGS(segment->base), GST_TIME_ARGS(segment->start));
+
+    segment->base = segment->start;
+    segment->flags = static_cast<GstSegmentFlags>(0);
+
+    return GST_PAD_PROBE_REMOVE;
+}
+
 void PlaybackPipeline::flush(AtomicString trackId)
 {
     ASSERT(WTF::isMainThread());
@@ -310,6 +336,10 @@ void PlaybackPipeline::flush(AtomicString trackId)
     Stream* stream = getStreamByTrackId(m_webKitMediaSrc.get(), trackId);
 
     if (!stream) {
+        GST_OBJECT_UNLOCK(m_webKitMediaSrc.get());
+        return;
+    }
+    if (!stream->lastEnqueuedTime.isValid()) {
         GST_OBJECT_UNLOCK(m_webKitMediaSrc.get());
         return;
     }
@@ -334,12 +364,43 @@ void PlaybackPipeline::flush(AtomicString trackId)
         return;
     }
 
+    double rate;
+    GstFormat format;
+    gint64 start = GST_CLOCK_TIME_NONE;
+    gint64 stop = GST_CLOCK_TIME_NONE;
+
+    query = adoptGRef(gst_query_new_segment(GST_FORMAT_TIME));
+    if (gst_element_query(pipeline(), query.get()))
+        gst_query_parse_segment(query.get(), &rate, &format, &start, &stop);
+
+    GST_TRACE("segment: [%" GST_TIME_FORMAT ", %" GST_TIME_FORMAT "], rate: %f",
+        GST_TIME_ARGS(start), GST_TIME_ARGS(stop), rate);
+
     if (!gst_element_send_event(GST_ELEMENT(appsrc), gst_event_new_flush_start())) {
         GST_WARNING("Failed to send flush-start event for trackId=%s", trackId.string().utf8().data());
+        return;
+    }
+
+    GUniquePtr<GstSegment> segment(gst_segment_new());
+    gst_segment_init(segment.get(), GST_FORMAT_TIME);
+    gst_segment_do_seek(segment.get(), rate, GST_FORMAT_TIME, GST_SEEK_FLAG_NONE,
+        GST_SEEK_TYPE_SET, position, GST_SEEK_TYPE_SET, stop, nullptr);
+
+    GRefPtr<GstPad> sinkPad = gst_element_get_static_pad(appsrc, "src");
+    GRefPtr<GstPad> srcPad = sinkPad ? gst_pad_get_peer(sinkPad.get()) : nullptr;
+    if (srcPad)
+        gst_pad_add_probe(srcPad.get(), GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM, segmentFixerProbe, nullptr, nullptr);
+
+    GST_TRACE("Sending new seamless segment: [%" GST_TIME_FORMAT ", %" GST_TIME_FORMAT "], rate: %f",
+        GST_TIME_ARGS(segment->start), GST_TIME_ARGS(segment->stop), segment->rate);
+
+    if (!gst_base_src_new_seamless_segment(GST_BASE_SRC(appsrc), segment->start, segment->stop, segment->start)) {
+        GST_WARNING("Failed to send seamless segment event for trackId=%s", trackId.string().utf8().data());
     }
 
     if (!gst_element_send_event(GST_ELEMENT(appsrc), gst_event_new_flush_stop(false))) {
         GST_WARNING("Failed to send flush-stop event for trackId=%s", trackId.string().utf8().data());
+        return;
     }
 
     GST_DEBUG("trackId=%s flushed", trackId.string().utf8().data());
