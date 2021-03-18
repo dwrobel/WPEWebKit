@@ -446,11 +446,14 @@ public:
             data.realTypes.m_linkType = LinkInvalid;
             data.realTypes.m_condition = condition;
         }
-        void operator=(const LinkRecord& other)
+        LinkRecord(const LinkRecord& other)
         {
-            data.copyTypes.content[0] = other.data.copyTypes.content[0];
-            data.copyTypes.content[1] = other.data.copyTypes.content[1];
-            data.copyTypes.content[2] = other.data.copyTypes.content[2];
+            data.copyTypes = other.data.copyTypes;
+        }
+        LinkRecord& operator=(const LinkRecord& other)
+        {
+            data.copyTypes = other.data.copyTypes;
+            return *this;
         }
         intptr_t from() const { return data.realTypes.m_from; }
         void setFrom(intptr_t from) { data.realTypes.m_from = from; }
